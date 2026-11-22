@@ -1,0 +1,2 @@
+[functions.analyze-appearance]
+verify_jwt = true

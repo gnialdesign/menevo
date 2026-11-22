@@ -20,6 +20,19 @@ O app continua funcionando sem conta e mantém perfil e progresso localmente. Pa
 
 O login sincroniza o perfil e até 90 dias de progresso recente. A aba Evolução mostra os últimos 30 dias registrados. As políticas RLS limitam cada conta aos próprios registros. O progresso continua salvo no aparelho e disponível offline.
 
+## Análise visual
+
+A tela **Análise** exige uma conta conectada, consentimento explícito e uma foto JPEG de até 8 MB. Ela envia a imagem ao bucket privado `analysis-photos`, chama a função `analyze-appearance` no Supabase e apaga o arquivo temporário após o processamento. O histórico guarda apenas o resultado; cada resultado pode ser apagado pelo próprio usuário. Há um limite inicial de três solicitações em 24 horas.
+
+Para ativar o recurso no projeto Supabase:
+
+1. Execute `supabase/migrations/20261122000200_appearance_analysis.sql` no SQL Editor do Supabase.
+2. Em **Project Settings → Edge Functions → Secrets**, adicione `OPENAI_API_KEY`. Use uma chave da API da OpenAI; não a coloque no `.env` do app nem no repositório.
+3. Instale/autentique o Supabase CLI, vincule-o ao projeto e publique `supabase/functions/analyze-appearance` com `npx supabase functions deploy analyze-appearance`.
+4. Reinicie o Expo. A leitura usa a Responses API com `gpt-4o-mini`; a chamada acontece somente na função do servidor.
+
+O app não envia a foto sem a caixa de consentimento marcada. O resultado oferece observações e ideias de apresentação pessoal; não pontua aparência nem faz diagnósticos.
+
 ## Escopo desta entrega
 
 - Interface demonstrativa editorial e experimental: retrato de campanha, recortes orgânicos, tipografia condensada, verde e laranja, sem conjunto de ícones genérico.
@@ -30,5 +43,5 @@ O login sincroniza o perfil e até 90 dias de progresso recente. A aba Evoluçã
 - A revelação da missão tem entrada animada; a evolução mostra uma árvore de fases tocável.
 - Conta por e-mail e senha e sincronização de perfil/progresso recente estão implementadas; exigem as variáveis do Supabase e a migração SQL acima.
 - A aba Evolução exibe até 30 dias do histórico local e sincronizado.
-- Telas de análise, pagamentos e chamadas de IA ainda não estão conectados; serão próximas etapas do produto.
+- Pagamentos e chamadas de IA para outras funções ainda não estão conectados.
 - Os números exibidos são demonstrativos.

@@ -1,13 +1,16 @@
 import { useEffect, useRef, useState } from 'react';
 import AsyncStorage from '@react-native-async-storage/async-storage';
-import { Animated, Easing, ImageBackground, ScrollView, StatusBar, StyleSheet, Text, TextInput, TouchableOpacity, View } from 'react-native';
+import { Animated, Easing, Image, ImageBackground, ScrollView, StatusBar, StyleSheet, Text, TextInput, TouchableOpacity, View } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import type { Session } from '@supabase/supabase-js';
+import * as ImagePicker from 'expo-image-picker';
 import { hasSupabaseConfig, supabase } from '../lib/supabase';
 
-type Tab = 'Início' | 'Rotina' | 'Evolução' | 'Perfil';
+type Tab = 'Início' | 'Rotina' | 'Análise' | 'Evolução' | 'Perfil';
 type UserProfile = { name: string; goal: string };
 type ProgressRecord = { local_date: string; done: number[]; missionDone: boolean; updatedAt: string };
+type AppearanceAdvice = { headline: string; observations: string[]; suggestions: { title: string; detail: string }[]; reminder: string };
+type AppearanceRecord = { id: string; status: string; result: AppearanceAdvice | null; created_at: string };
 const profileStorageKey = 'mens-evolution-profile-v1';
 const progressStoragePrefix = 'mens-evolution-progress-';
 const profileGoals = ['Autocuidado', 'Movimento', 'Estilo', 'Rotina'];
@@ -135,6 +138,11 @@ export default function Home() {
   const [missionDone, setMissionDone] = useState(false);
   const [notice, setNotice] = useState('');
   const [session, setSession] = useState<Session | null>(null);
+  const [analysisPhotoUri, setAnalysisPhotoUri] = useState<string | null>(null);
+  const [analysisConsent, setAnalysisConsent] = useState(false);
+  const [analysisBusy, setAnalysisBusy] = useState(false);
+  const [analysisRecords, setAnalysisRecords] = useState<AppearanceRecord[]>([]);
+  const [analysisHistoryBusy, setAnalysisHistoryBusy] = useState(false);
   const [accountMode, setAccountMode] = useState<'signin' | 'signup' | null>(null);
   const [authEmail, setAuthEmail] = useState('');
   const [authPassword, setAuthPassword] = useState('');
@@ -248,6 +256,8 @@ export default function Home() {
     if (error) { showNotice('Não foi possível sair agora.'); return; }
     syncedUser.current = null;
     setSession(null);
+    setAnalysisPhotoUri(null);
+    setAnalysisConsent(false);
     showNotice('Sessão encerrada. Seus dados continuam neste aparelho.');
   };
 
@@ -257,6 +267,80 @@ export default function Home() {
     catch (error) { syncedUser.current = null; showNotice(error instanceof Error ? `Sincronização: ${error.message}` : 'Não foi possível sincronizar agora.'); }
   };
 
+  const loadAppearanceHistory = async (userId: string) => {
+    if (!supabase) return;
+    setAnalysisHistoryBusy(true);
+    try {
+      const { data, error } = await supabase.from('appearance_analyses').select('id,status,result,created_at').eq('user_id', userId).eq('status', 'completed').order('created_at', { ascending: false }).limit(10);
+      if (!error) setAnalysisRecords((data ?? []) as AppearanceRecord[]);
+    } finally { setAnalysisHistoryBusy(false); }
+  };
+
+  const chooseAnalysisPhoto = async (useCamera = false) => {
+    if (useCamera) {
+      const permission = await ImagePicker.requestCameraPermissionsAsync();
+      if (!permission.granted) { showNotice('A câmera precisa de permissão para tirar a foto.'); return; }
+    } else {
+      const permission = await ImagePicker.requestMediaLibraryPermissionsAsync();
+      if (!permission.granted) { showNotice('Permita o acesso às fotos para escolher uma imagem.'); return; }
+    }
+    const options: ImagePicker.ImagePickerOptions = { mediaTypes: ['images'], allowsEditing: true, aspect: [4, 5], quality: 0.82, exif: false };
+    const result = useCamera ? await ImagePicker.launchCameraAsync(options) : await ImagePicker.launchImageLibraryAsync(options);
+    if (result.canceled || !result.assets[0]?.uri) return;
+    setAnalysisPhotoUri(result.assets[0].uri);
+  };
+
+  const submitAppearanceAnalysis = async () => {
+    if (!supabase || !session?.user.id) {
+      showNotice('Entre na sua conta para fazer uma análise privada.');
+      setTab('Perfil');
+      if (hasSupabaseConfig) setAccountMode('signin');
+      return;
+    }
+    if (!analysisPhotoUri) { showNotice('Escolha uma foto primeiro.'); return; }
+    if (!analysisConsent) { showNotice('Leia e aceite o uso da foto para continuar.'); return; }
+    setAnalysisBusy(true);
+    let recordId: string | null = null;
+    let photoPath: string | null = null;
+    try {
+      const { data: row, error: createError } = await supabase.from('appearance_analyses').insert({ user_id: session.user.id, consent_at: new Date().toISOString() }).select('id').single();
+      if (createError) throw createError;
+      recordId = row.id;
+      photoPath = `${session.user.id}/${recordId}.jpg`;
+      const imageResponse = await fetch(analysisPhotoUri);
+      const imageBlob = await imageResponse.blob();
+      if (imageBlob.size > 8 * 1024 * 1024) throw new Error('A foto passou do limite de 8 MB. Escolha uma imagem menor.');
+      const { error: uploadError } = await supabase.storage.from('analysis-photos').upload(photoPath, imageBlob, { contentType: 'image/jpeg', upsert: false });
+      if (uploadError) throw uploadError;
+      const { data, error: invokeError } = await supabase.functions.invoke('analyze-appearance', { body: { analysis_id: recordId } });
+      if (invokeError) {
+        let serverMessage = '';
+        try { serverMessage = (await invokeError.context?.clone().json())?.error ?? ''; } catch { /* use the generic function error below */ }
+        throw new Error(serverMessage || invokeError.message);
+      }
+      if (data?.error) throw new Error(data.error);
+      await loadAppearanceHistory(session.user.id);
+      setAnalysisPhotoUri(null);
+      setAnalysisConsent(false);
+      showNotice('Análise pronta. A foto temporária foi removida.');
+    } catch (error) {
+      if (photoPath) await supabase.storage.from('analysis-photos').remove([photoPath]).catch(() => undefined);
+      if (recordId) await supabase.from('appearance_analyses').delete().eq('id', recordId).eq('user_id', session.user.id);
+      const message = error instanceof Error ? error.message : '';
+      showNotice(message.includes('8 MB') || message.includes('três leituras') || message.includes('Serviço ainda não configurado') ? message : 'Não foi possível concluir. Confira sua conexão e tente novamente.');
+    } finally {
+      setAnalysisBusy(false);
+    }
+  };
+
+  const deleteAppearanceRecord = async (id: string) => {
+    if (!supabase || !session?.user.id) return;
+    const { error } = await supabase.from('appearance_analyses').delete().eq('id', id).eq('user_id', session.user.id);
+    if (error) { showNotice('Não foi possível apagar este resultado.'); return; }
+    setAnalysisRecords((records) => records.filter((record) => record.id !== id));
+    showNotice('Resultado apagado.');
+  };
+
   useEffect(() => {
     if (!supabase) return;
     let mounted = true;
@@ -264,6 +348,17 @@ export default function Home() {
     const { data: { subscription } } = supabase.auth.onAuthStateChange((_event, nextSession) => setSession(nextSession));
     return () => { mounted = false; subscription.unsubscribe(); };
   }, []);
+
+  useEffect(() => {
+    if (!session?.user.id) { setAnalysisRecords([]); setAnalysisHistoryBusy(false); return; }
+    let active = true;
+    setAnalysisHistoryBusy(true);
+    supabase?.from('appearance_analyses').select('id,status,result,created_at').eq('user_id', session.user.id).eq('status', 'completed').order('created_at', { ascending: false }).limit(10).then(({ data, error }) => {
+      if (active && !error) setAnalysisRecords((data ?? []) as AppearanceRecord[]);
+      if (active) setAnalysisHistoryBusy(false);
+    });
+    return () => { active = false; };
+  }, [session?.user.id]);
 
   useEffect(() => {
     if (!session?.user.id || !profile || !profileLoaded || !progressLoaded || !historyLoaded || syncedUser.current === session.user.id) return;
@@ -540,7 +635,36 @@ export default function Home() {
         {visibleHistory.length === 0 ? <View style={e.historyEmpty}><Text style={e.historyEmptyTitle}>SEU PRIMEIRO REGISTRO COMEÇA HOJE.</Text><Text style={e.historyEmptyBody}>Quando você marcar passos ou missões, eles aparecem por aqui.</Text></View> : null}
       </View>
       {recentHistory.length > 7 ? <TouchableOpacity onPress={() => setHistoryExpanded((value) => !value)} style={e.historyToggle}><Text style={e.historyToggleText}>{historyExpanded ? 'MOSTRAR MENOS' : 'VER MAIS DIAS'}</Text><Text style={e.historyToggleArrow}>{historyExpanded ? '↗' : '↘'}</Text></TouchableOpacity> : null}
-      <View style={s.photoPrompt}><Text style={s.photoPromptTitle}>SEU PONTO DE PARTIDA</Text><Text style={s.photoPromptText}>Quando quiser, registre uma foto para comparar com você mesmo ao longo do tempo.</Text><Text style={s.photoPromptArrow}>VER COMO FUNCIONA  ↗</Text></View>
+      <TouchableOpacity accessibilityRole="button" onPress={() => setTab('Análise')} style={s.photoPrompt}><Text style={s.photoPromptTitle}>SEU PONTO DE PARTIDA</Text><Text style={s.photoPromptText}>Peça uma leitura de apresentação pessoal e receba ideias práticas para experimentar.</Text><Text style={s.photoPromptArrow}>ABRIR ANÁLISE VISUAL  ↗</Text></TouchableOpacity>
+    </ScrollView>}
+
+    {tab === 'Análise' && <ScrollView contentContainerStyle={s.content} showsVerticalScrollIndicator={false}>
+      <PageHeading eyebrow="SEU OLHAR / SEM NOTAS" title="LEITURA VISUAL." subtitle="Sugestões de apresentação pessoal, feitas a partir de uma foto que você escolher." />
+      <View style={a.introCard}><View style={a.introMark}><Text style={a.introMarkText}>01</Text></View><View style={a.introCopy}><Text style={a.introLabel}>UMA LEITURA, NÃO UM JULGAMENTO</Text><Text style={a.introText}>A análise observa cabelo, barba, roupa, pose e luz. Sem nota de aparência e sem diagnóstico de saúde.</Text></View></View>
+
+      {!session ? <View style={a.gateCard}><Text style={a.gateKicker}>ACESSO PRIVADO</Text><Text style={a.gateTitle}>Sua foto fica ligada à sua conta.</Text><Text style={a.gateText}>Entre ou crie uma conta para enviar a imagem com segurança e ver seus resultados só aqui.</Text><TouchableOpacity style={a.gateButton} onPress={() => { setTab('Perfil'); setAccountMode(hasSupabaseConfig ? 'signin' : null); }}><Text style={a.gateButtonText}>{hasSupabaseConfig ? 'ENTRAR NA MINHA CONTA' : 'CONFIGURAR CONTA'}</Text><Text style={a.gateButtonArrow}>↗</Text></TouchableOpacity></View> : <>
+        <View style={a.photoStage}>
+          <Text style={a.sectionKicker}>ESCOLHA UMA FOTO / ATÉ 8 MB / 3 LEITURAS EM 24 H</Text>
+          {analysisPhotoUri ? <Image source={{ uri: analysisPhotoUri }} resizeMode="cover" style={a.photoPreview} /> : <View style={a.photoEmpty}><Text style={a.photoGlyph}>◌</Text><Text style={a.photoEmptyTitle}>UM RETRATO SIMPLES JÁ BASTA.</Text><Text style={a.photoEmptyText}>Prefira boa luz, rosto e roupa visíveis. Evite filtros fortes e outras pessoas no enquadramento.</Text></View>}
+          <View style={a.photoActions}><TouchableOpacity onPress={() => chooseAnalysisPhoto(false)} style={a.photoButton}><Text style={a.photoButtonText}>ESCOLHER FOTO</Text><Text style={a.photoButtonArrow}>↗</Text></TouchableOpacity><TouchableOpacity onPress={() => chooseAnalysisPhoto(true)} style={[a.photoButton, a.photoButtonAlt]}><Text style={a.photoButtonAltText}>TIRAR FOTO</Text><Text style={a.photoButtonAltArrow}>◎</Text></TouchableOpacity></View>
+        </View>
+        <TouchableOpacity accessibilityRole="checkbox" accessibilityState={{ checked: analysisConsent }} onPress={() => setAnalysisConsent((value) => !value)} style={a.consentRow}>
+          <View style={[a.consentBox, analysisConsent && a.consentBoxChecked]}>{analysisConsent ? <Text style={a.consentCheck}>✓</Text> : null}</View>
+          <Text style={a.consentText}>Autorizo o envio desta foto à OpenAI para gerar as sugestões. A cópia temporária no armazenamento do Men’s Evolution será apagada após o processamento; o resultado fica no meu histórico até eu apagá-lo.</Text>
+        </TouchableOpacity>
+        <View style={a.privacyNote}><Text style={a.privacyMark}>↳</Text><Text style={a.privacyText}>O envio e o processamento exigem conexão. A foto fica em armazenamento privado e é removida ao concluir, inclusive quando ocorre um erro.</Text></View>
+        <TouchableOpacity disabled={analysisBusy || !analysisPhotoUri || !analysisConsent} onPress={submitAppearanceAnalysis} style={[a.analyzeButton, (analysisBusy || !analysisPhotoUri || !analysisConsent) && a.analyzeButtonDisabled]}><Text style={a.analyzeButtonText}>{analysisBusy ? 'LENDO A IMAGEM…' : 'FAZER MINHA LEITURA'}</Text><Text style={a.analyzeButtonArrow}>{analysisBusy ? '···' : '↗'}</Text></TouchableOpacity>
+      </>}
+
+      <View style={a.historyHeading}><View><Text style={a.sectionKicker}>SEU HISTÓRICO</Text><Text style={a.historyTitle}>IDEIAS PARA LEVAR.</Text></View><Text style={a.historyCount}>{analysisRecords.length}/10</Text></View>
+      {analysisHistoryBusy ? <Text style={a.emptyHistory}>CARREGANDO SUAS LEITURAS…</Text> : analysisRecords.length === 0 ? <View style={a.emptyHistory}><Text style={a.emptyHistoryTitle}>AINDA SEM LEITURAS.</Text><Text style={a.emptyHistoryText}>Seus resultados concluídos aparecem aqui. A foto original não é guardada no histórico.</Text></View> : analysisRecords.map((record, index) => <View key={record.id} style={a.resultCard}>
+        <View style={a.resultTop}><Text style={a.resultNumber}>LEITURA / {String(analysisRecords.length - index).padStart(2, '0')}</Text><Text style={a.resultDate}>{new Intl.DateTimeFormat('pt-BR', { day: '2-digit', month: 'short' }).format(new Date(record.created_at)).replace('.', '').toUpperCase()}</Text></View>
+        <Text style={a.resultHeadline}>{record.result?.headline ?? 'UMA IDEIA PARA SEU PRÓXIMO PASSO.'}</Text>
+        {record.result?.observations?.map((item, i) => <View key={`o-${i}`} style={a.resultLine}><Text style={a.resultDot}>·</Text><Text style={a.resultBody}>{item}</Text></View>)}
+        {record.result?.suggestions?.map((item, i) => <View key={`s-${i}`} style={a.suggestionRow}><Text style={a.suggestionIndex}>{String(i + 1).padStart(2, '0')}</Text><View style={a.suggestionCopy}><Text style={a.suggestionTitle}>{item.title}</Text><Text style={a.suggestionDetail}>{item.detail}</Text></View></View>)}
+        {record.result?.reminder ? <Text style={a.resultReminder}>{record.result.reminder}</Text> : null}
+        <TouchableOpacity onPress={() => deleteAppearanceRecord(record.id)} style={a.deleteResult}><Text style={a.deleteResultText}>APAGAR ESTE RESULTADO  ×</Text></TouchableOpacity>
+      </View>)}
     </ScrollView>}
 
     {tab === 'Perfil' && <ScrollView contentContainerStyle={s.content} showsVerticalScrollIndicator={false}>
@@ -553,7 +677,7 @@ export default function Home() {
     </ScrollView>}
 
     {notice ? <View style={s.toast}><Text style={s.toastDot}>•</Text><Text style={s.toastText}>{notice}</Text></View> : null}
-    <View style={s.nav}>{([['Início','01'],['Rotina','02'],['Evolução','03'],['Perfil','04']] as const).map(([label, number]) => <TouchableOpacity accessibilityRole="tab" accessibilityState={{ selected: tab === label }} key={label} style={s.navItem} onPress={() => setTab(label)}><View style={[s.navDash, tab === label && s.navDashActive]} /><Text style={[s.navNumber, tab === label && s.navNumberActive]}>{number}</Text><Text style={[s.navLabel, tab === label && s.navActive]}>{label}</Text></TouchableOpacity>)}</View>
+    <View style={s.nav}>{([['Início','01'],['Rotina','02'],['Análise','03'],['Evolução','04'],['Perfil','05']] as const).map(([label, number]) => <TouchableOpacity accessibilityRole="tab" accessibilityState={{ selected: tab === label }} key={label} style={[s.navItem, s.navItemCompact]} onPress={() => setTab(label)}><View style={[s.navDash, tab === label && s.navDashActive]} /><Text style={[s.navNumber, tab === label && s.navNumberActive]}>{number}</Text><Text style={[s.navLabel, s.navLabelCompact, tab === label && s.navActive]}>{label}</Text></TouchableOpacity>)}</View>
   </SafeAreaView>;
 }
 
@@ -567,11 +691,21 @@ const s = StyleSheet.create({
   heroStage:{marginBottom:27},heroImage:{height:395,justifyContent:'space-between',padding:18},heroImageShape:{borderTopLeftRadius:75,borderTopRightRadius:26,borderBottomLeftRadius:28,borderBottomRightRadius:82},heroTopline:{flexDirection:'row',justifyContent:'space-between',alignItems:'center'},heroBrand:{fontSize:8,fontWeight:'900',letterSpacing:1.1,color:ink,backgroundColor:'rgba(246,241,231,0.76)',paddingHorizontal:10,paddingVertical:7,borderRadius:30,overflow:'hidden'},heroDate:{fontSize:9,fontWeight:'900',letterSpacing:1,color:ink,backgroundColor:lime,paddingHorizontal:10,paddingVertical:7,borderRadius:20,overflow:'hidden'},heroCopyPlate:{width:'50%',marginTop:37,padding:12,backgroundColor:'rgba(246,241,231,0.92)',borderTopLeftRadius:4,borderTopRightRadius:27,borderBottomLeftRadius:27,borderBottomRightRadius:4},heroCopy:{width:'100%'},heroKicker:{fontSize:8,fontWeight:'900',letterSpacing:1.4,color:green,marginBottom:9},heroHeadline:{fontFamily:'sans-serif-condensed',fontWeight:'900',fontSize:40,lineHeight:38,letterSpacing:-1.4,color:ink},heroCaption:{fontSize:11,lineHeight:16,color:ink,marginTop:10,width:'88%'},stickerWrap:{position:'absolute',right:18,bottom:78,width:64,height:64,alignItems:'center',justifyContent:'center'},orbitSticker:{width:64,height:64,borderWidth:1,borderStyle:'dashed',borderColor:orange,borderRadius:32},stickerCore:{position:'absolute',width:40,height:40,borderRadius:20,backgroundColor:orange,alignItems:'center',justifyContent:'center'},stickerSymbol:{fontFamily:'sans-serif-condensed',fontSize:13,fontWeight:'900',color:paper},heroFooter:{flexDirection:'row',alignItems:'center',justifyContent:'space-between',marginTop:'auto'},heroFooterText:{fontSize:8,fontWeight:'900',letterSpacing:1.25,color:ink,backgroundColor:'rgba(246,241,231,0.8)',paddingHorizontal:10,paddingVertical:7,borderRadius:20,overflow:'hidden'},heroFooterDash:{fontSize:20,color:orange},revealTab:{alignSelf:'flex-end',marginTop:-18,marginRight:15,backgroundColor:orange,paddingHorizontal:18,paddingVertical:12,borderRadius:24,borderTopLeftRadius:6,flexDirection:'row',alignItems:'center',gap:13,elevation:4},revealTabText:{fontSize:9,fontWeight:'900',letterSpacing:1.1,color:paper},revealArrow:{fontSize:17,fontWeight:'900',color:paper},
   missionNote:{marginTop:-24,marginHorizontal:13,padding:17,paddingTop:21,backgroundColor:lime,borderTopLeftRadius:8,borderTopRightRadius:34,borderBottomLeftRadius:34,borderBottomRightRadius:8,elevation:3},noteTop:{flexDirection:'row',justifyContent:'space-between',alignItems:'center'},noteCategory:{fontSize:8,fontWeight:'900',letterSpacing:1.1,color:green},noteReward:{fontSize:9,fontWeight:'900',letterSpacing:.7,color:ink,backgroundColor:'#EFF8D1',borderRadius:16,paddingHorizontal:10,paddingVertical:6},noteTitle:{fontFamily:'sans-serif-condensed',fontSize:25,lineHeight:27,fontWeight:'900',color:ink,marginTop:11},noteDetail:{fontSize:11,lineHeight:16,color:'#36584D',marginTop:6},noteButton:{marginTop:13,backgroundColor:ink,paddingHorizontal:13,paddingVertical:11,borderRadius:19,borderTopLeftRadius:5,flexDirection:'row',justifyContent:'space-between',alignItems:'center'},noteButtonDone:{backgroundColor:green},noteButtonText:{fontSize:8,fontWeight:'900',letterSpacing:1,color:paper},noteButtonGlyph:{fontSize:16,color:paper,fontWeight:'900'},
   todayHead:{flexDirection:'row',alignItems:'flex-end',justifyContent:'space-between',marginBottom:12},todayLabel:{fontSize:8,fontWeight:'900',letterSpacing:1.6,color:green,marginBottom:5},todayCount:{fontFamily:'sans-serif-condensed',fontWeight:'900',fontSize:31,color:ink},todaySlash:{fontSize:21,color:orange},todayCountWord:{fontSize:14,color:green},xpStamp:{backgroundColor:ink,borderTopLeftRadius:18,borderBottomRightRadius:18,paddingHorizontal:14,paddingVertical:8,alignItems:'center'},xpValue:{fontFamily:'sans-serif-condensed',fontSize:18,fontWeight:'900',color:lime},xpLabel:{fontSize:7,fontWeight:'900',letterSpacing:1,color:paper,marginTop:1},progressRail:{height:6,flexDirection:'row',gap:4,marginBottom:20},progressPiece:{flex:1,backgroundColor:'#DFE0D3',borderRadius:8},progressPieceOn:{backgroundColor:orange},todaySection:{flexDirection:'row',alignItems:'baseline',justifyContent:'space-between',marginBottom:5},sectionTitle:{fontFamily:'sans-serif-condensed',fontSize:20,fontWeight:'900',letterSpacing:.1,color:ink},sectionHint:{fontSize:9,fontWeight:'900',letterSpacing:.7,color:green},taskList:{marginBottom:22},taskRow:{minHeight:66,flexDirection:'row',alignItems:'center',gap:12},rowRule:{borderBottomWidth:StyleSheet.hairlineWidth,borderBottomColor:line},taskIndex:{fontFamily:'sans-serif-condensed',fontSize:17,fontWeight:'900',color:orange,width:27},taskIndexDone:{color:green},taskCopy:{flex:1},taskName:{fontSize:13,fontWeight:'800',color:ink},taskNameDone:{color:quiet,textDecorationLine:'line-through'},taskMeta:{fontSize:8,fontWeight:'800',letterSpacing:.8,color:quiet,marginTop:4},taskCheck:{width:23,height:23,borderRadius:12,borderWidth:1.5,borderColor:'#9CAB93',alignItems:'center',justifyContent:'center'},taskCheckDone:{backgroundColor:green,borderColor:green},checkGlyph:{color:paper,fontSize:13,fontWeight:'900'},nextPrompt:{minHeight:70,backgroundColor:'#E8E8D9',borderTopLeftRadius:27,borderBottomRightRadius:27,flexDirection:'row',alignItems:'center',paddingHorizontal:15,gap:13,marginTop:6},nextIndex:{fontFamily:'sans-serif-condensed',fontSize:31,fontWeight:'900',color:orange},nextCopy:{flex:1},nextLabel:{fontSize:7,fontWeight:'900',letterSpacing:1.1,color:green},nextTitle:{fontFamily:'sans-serif-condensed',fontSize:17,fontWeight:'900',color:ink,marginTop:3},nextArrow:{fontSize:24,color:green,fontWeight:'900'},
-  nav:{height:71,borderTopWidth:1,borderTopColor:line,backgroundColor:paper,flexDirection:'row',alignItems:'center',justifyContent:'space-around',paddingBottom:5},navItem:{minWidth:62,alignItems:'center',justifyContent:'center',gap:2},navDash:{width:18,height:3,borderRadius:3,backgroundColor:'transparent',marginBottom:2},navDashActive:{width:28,backgroundColor:orange},navNumber:{fontSize:7,fontWeight:'900',letterSpacing:1,color:'#A4AAA0'},navNumberActive:{color:green},navLabel:{fontSize:9,color:quiet,fontWeight:'700'},navActive:{color:ink,fontWeight:'900'},
+  nav:{height:71,borderTopWidth:1,borderTopColor:line,backgroundColor:paper,flexDirection:'row',alignItems:'center',justifyContent:'space-around',paddingBottom:5},navItem:{minWidth:62,alignItems:'center',justifyContent:'center',gap:2},navItemCompact:{minWidth:0,flex:1},navDash:{width:18,height:3,borderRadius:3,backgroundColor:'transparent',marginBottom:2},navDashActive:{width:28,backgroundColor:orange},navNumber:{fontSize:7,fontWeight:'900',letterSpacing:1,color:'#A4AAA0'},navNumberActive:{color:green},navLabel:{fontSize:9,color:quiet,fontWeight:'700'},navLabelCompact:{fontSize:8},navActive:{color:ink,fontWeight:'900'},
   weekRibbon:{backgroundColor:ink,paddingHorizontal:17,paddingVertical:17,borderTopLeftRadius:26,borderBottomRightRadius:26,marginBottom:29},weekTitle:{fontSize:8,fontWeight:'900',letterSpacing:1.3,color:lime},weekDots:{flexDirection:'row',justifyContent:'space-between',marginTop:15},weekDay:{alignItems:'center',gap:7},weekLetter:{fontSize:9,fontWeight:'800',color:'#B6C5B9'},weekLetterToday:{color:lime},weekDot:{width:22,height:22,borderRadius:11,borderWidth:1,borderColor:'#637C6D',alignItems:'center',justifyContent:'center'},weekDotToday:{backgroundColor:orange,borderColor:orange},weekDotCore:{width:5,height:5,borderRadius:3,backgroundColor:paper},routineHeading:{flexDirection:'row',alignItems:'baseline',justifyContent:'space-between',marginBottom:1},routineNumber:{fontSize:8,fontWeight:'900',letterSpacing:1,color:orange},noteCard:{backgroundColor:'#E3F0D0',padding:17,borderTopLeftRadius:8,borderTopRightRadius:27,borderBottomLeftRadius:27,borderBottomRightRadius:8},noteCardLabel:{fontSize:8,fontWeight:'900',letterSpacing:1.3,color:green},noteCardText:{fontFamily:'sans-serif-condensed',fontSize:19,fontWeight:'800',color:ink,marginTop:8,lineHeight:23},
   rankBand:{backgroundColor:ink,padding:18,borderTopLeftRadius:31,borderBottomRightRadius:31,marginBottom:29},rankLabel:{fontSize:8,fontWeight:'900',letterSpacing:1.3,color:lime},rankNumber:{fontFamily:'sans-serif-condensed',fontSize:52,fontWeight:'900',color:paper,marginTop:5},rankUnit:{fontSize:18,color:lime},rankTrack:{height:5,backgroundColor:'#385F53',borderRadius:4,marginTop:6},rankFill:{height:5,backgroundColor:orange,borderRadius:4},rankFoot:{fontSize:9,color:'#C7D5C8',marginTop:9},treeHeading:{flexDirection:'row',alignItems:'baseline',justifyContent:'space-between',marginBottom:15},treeHint:{fontSize:7,fontWeight:'900',letterSpacing:.9,color:quiet},tree:{position:'relative',paddingVertical:2,marginBottom:24},treeSpine:{position:'absolute',top:22,bottom:23,left:21,width:2,backgroundColor:'#C5D3B2'},treeNodeRow:{minHeight:76,flexDirection:'row',alignItems:'center',gap:12},treeNodeOffset:{marginLeft:22},treeNode:{width:44,height:44,borderRadius:24,alignItems:'center',justifyContent:'center',zIndex:1},treeNodeOpen:{backgroundColor:orange,borderWidth:3,borderColor:'#F9B383'},treeNodeLocked:{backgroundColor:paper,borderWidth:1.5,borderColor:'#BFC8B5'},treeNodeNumber:{fontFamily:'sans-serif-condensed',fontSize:14,fontWeight:'900',color:quiet},treeNodeNumberOpen:{color:paper},treeNodeCopy:{flex:1},treeNodeTitle:{fontSize:10,fontWeight:'900',letterSpacing:1,color:ink},treeNodeDescription:{fontSize:9,color:quiet,marginTop:3,lineHeight:13},treeNodeStatus:{fontSize:6,fontWeight:'900',letterSpacing:.5,color:green},photoPrompt:{paddingTop:17,borderTopWidth:1,borderTopColor:line},photoPromptTitle:{fontFamily:'sans-serif-condensed',fontSize:19,fontWeight:'900',color:ink},photoPromptText:{fontSize:11,color:quiet,lineHeight:16,marginTop:5},photoPromptArrow:{fontSize:8,fontWeight:'900',letterSpacing:1,color:orange,marginTop:11},
   setupSafe:{flex:1,backgroundColor:ink},setupBackdrop:{flex:1},setupTint:{...StyleSheet.absoluteFillObject,backgroundColor:'rgba(18,62,57,0.18)'},easterHotspot:{position:'absolute',right:17,top:'42%',width:38,height:38,zIndex:5,alignItems:'center',justifyContent:'center'},easterMark:{width:26,height:26,borderRadius:13,borderWidth:1,borderColor:'rgba(243,90,43,0.75)',backgroundColor:'rgba(18,62,57,0.82)',alignItems:'center',justifyContent:'center'},easterGlyph:{fontSize:12,color:orange,fontWeight:'900'},easterNote:{position:'absolute',right:61,top:'41.3%',maxWidth:215,backgroundColor:'rgba(18,62,57,0.95)',paddingHorizontal:13,paddingVertical:9,borderTopLeftRadius:3,borderTopRightRadius:16,borderBottomLeftRadius:16,borderBottomRightRadius:3,borderWidth:1,borderColor:'rgba(221,242,138,0.3)',zIndex:4},easterNoteKicker:{fontSize:6,fontWeight:'900',letterSpacing:1.1,color:lime},easterNoteText:{fontFamily:'sans-serif-condensed',fontSize:14,fontWeight:'900',color:paper,marginTop:4},setupPage:{flexGrow:1,justifyContent:'space-between',paddingHorizontal:24,paddingTop:20,paddingBottom:26},setupTop:{flexDirection:'row',alignItems:'center',justifyContent:'space-between'},setupWordmark:{flexDirection:'row',alignItems:'center',gap:9},setupMark:{fontFamily:'sans-serif-condensed',fontSize:20,fontWeight:'900',letterSpacing:-1,color:orange},setupBrand:{fontSize:9,fontWeight:'900',letterSpacing:1.2,color:paper},setupIndex:{fontSize:7,fontWeight:'900',letterSpacing:1,color:lime},setupIntro:{marginTop:46,marginBottom:26},setupEyebrow:{fontSize:8,fontWeight:'900',letterSpacing:1.7,color:lime,marginBottom:11},setupTitle:{fontFamily:'sans-serif-condensed',fontSize:52,lineHeight:56,fontWeight:'900',letterSpacing:-1.4,color:paper},setupSubtitle:{fontSize:12,lineHeight:18,color:'#C3D2C5',marginTop:19,maxWidth:300},setupForm:{marginTop:3},setupLabel:{fontSize:8,fontWeight:'900',letterSpacing:1.25,color:lime,marginTop:19,marginBottom:8},setupInput:{height:48,borderBottomWidth:1,borderBottomColor:'#668176',color:paper,fontSize:19,fontWeight:'700',paddingHorizontal:2,paddingVertical:7},primaryGoal:{minHeight:76,backgroundColor:lime,borderTopLeftRadius:25,borderTopRightRadius:5,borderBottomLeftRadius:5,borderBottomRightRadius:25,paddingHorizontal:15,paddingVertical:12,justifyContent:'space-between'},primaryGoalMeta:{flexDirection:'row',justifyContent:'space-between',alignItems:'center'},primaryGoalKicker:{fontSize:7,fontWeight:'900',letterSpacing:1,color:green},primaryGoalNumber:{fontSize:7,fontWeight:'900',letterSpacing:.8,color:green},primaryGoalBottom:{flexDirection:'row',alignItems:'center',justifyContent:'space-between',marginTop:8},primaryGoalTitle:{fontFamily:'sans-serif-condensed',fontSize:21,fontWeight:'900',letterSpacing:.4,color:ink},primaryGoalArrow:{fontSize:20,fontWeight:'900',color:orange},secondaryGoalHeading:{flexDirection:'row',alignItems:'baseline',justifyContent:'space-between',marginTop:16,marginBottom:8},secondaryGoalTitle:{fontSize:8,fontWeight:'900',letterSpacing:1.1,color:lime},secondaryGoalHint:{fontSize:7,fontWeight:'900',letterSpacing:.8,color:'#B6C9B8'},secondaryGoals:{width:'100%',flexDirection:'row',justifyContent:'space-between'},secondaryGoalWrap:{width:'31.8%',flexGrow:0,flexShrink:0},secondaryGoal:{width:'100%',minHeight:66,backgroundColor:'rgba(26,80,71,0.94)',borderTopLeftRadius:16,borderTopRightRadius:4,borderBottomLeftRadius:4,borderBottomRightRadius:16,paddingHorizontal:8,paddingVertical:9,justifyContent:'space-between',borderWidth:1,borderColor:'rgba(221,242,138,0.14)'},secondaryGoalNumber:{fontFamily:'sans-serif-condensed',fontSize:11,fontWeight:'900',color:'#9BB3A2'},secondaryGoalLabel:{fontSize:7,fontWeight:'900',letterSpacing:.2,color:paper},secondaryGoalArrow:{alignSelf:'flex-end',fontSize:13,color:'#A7BAAB',fontWeight:'700'},setupError:{fontSize:10,fontWeight:'700',color:'#FF9D7F',marginTop:8},setupBottom:{marginTop:22},setupPrivacy:{fontSize:9,color:'#B6C9B8',marginBottom:12},setupButton:{minHeight:52,backgroundColor:orange,borderTopLeftRadius:5,borderTopRightRadius:25,borderBottomLeftRadius:25,borderBottomRightRadius:5,flexDirection:'row',alignItems:'center',justifyContent:'space-between',paddingHorizontal:17},setupButtonText:{fontSize:9,fontWeight:'900',letterSpacing:1,color:paper},setupButtonArrow:{fontSize:19,color:paper,fontWeight:'900'},setupCancel:{alignSelf:'center',paddingVertical:12},setupCancelText:{fontSize:8,fontWeight:'900',letterSpacing:1,color:'#C3D2C5'},profileLoading:{flex:1,alignItems:'center',justifyContent:'center'},profileLoadingText:{fontSize:9,fontWeight:'900',letterSpacing:1.3,color:green},
   profileBanner:{flexDirection:'row',alignItems:'center',gap:12,paddingVertical:18,borderTopWidth:1,borderBottomWidth:1,borderColor:line,marginBottom:25},profileMono:{fontFamily:'sans-serif-condensed',fontWeight:'900',fontSize:21,color:orange},profileIdentity:{flex:1},profileTitle:{fontFamily:'sans-serif-condensed',fontWeight:'900',fontSize:18,color:ink},profileSubtitle:{fontSize:9,color:quiet,marginTop:3},editLink:{fontSize:7,fontWeight:'900',letterSpacing:.8,color:green},preferenceRow:{minHeight:58,flexDirection:'row',alignItems:'center',gap:10},preferenceLabel:{width:86,fontSize:8,fontWeight:'900',letterSpacing:1,color:green},preferenceValue:{flex:1,fontSize:11,fontWeight:'700',color:ink},preferenceArrow:{fontSize:15,color:orange,fontWeight:'900'},profilePlan:{marginTop:28,paddingTop:17,borderTopWidth:1,borderTopColor:line},profilePlanLabel:{fontSize:8,fontWeight:'900',letterSpacing:1.3,color:green},profilePlanTitle:{fontFamily:'sans-serif-condensed',fontSize:18,fontWeight:'900',color:ink,marginTop:6},profilePlanSub:{fontSize:10,color:quiet,marginTop:3},toast:{position:'absolute',bottom:82,left:22,right:22,flexDirection:'row',alignItems:'center',gap:8,backgroundColor:ink,paddingHorizontal:14,paddingVertical:12,borderTopLeftRadius:18,borderBottomRightRadius:18},toastDot:{fontSize:18,color:lime},toastText:{flex:1,color:paper,fontSize:10,fontWeight:'700'}
+});
+
+const a = StyleSheet.create({
+  introCard:{flexDirection:'row',alignItems:'center',gap:12,backgroundColor:'#E5EBDD',padding:15,marginBottom:22,borderTopLeftRadius:5,borderTopRightRadius:28,borderBottomLeftRadius:28,borderBottomRightRadius:5},
+  introMark:{width:42,height:42,alignItems:'center',justifyContent:'center',backgroundColor:orange,borderTopLeftRadius:15,borderTopRightRadius:5,borderBottomLeftRadius:5,borderBottomRightRadius:15,transform:[{rotate:'-7deg'}]},introMarkText:{fontFamily:'sans-serif-condensed',fontWeight:'900',fontSize:15,color:paper},introCopy:{flex:1},introLabel:{fontSize:7,fontWeight:'900',letterSpacing:1.1,color:green},introText:{fontSize:10,lineHeight:15,color:ink,marginTop:4},
+  gateCard:{backgroundColor:ink,padding:19,marginBottom:23,borderTopLeftRadius:34,borderTopRightRadius:5,borderBottomLeftRadius:5,borderBottomRightRadius:34},gateKicker:{fontSize:8,fontWeight:'900',letterSpacing:1.4,color:lime},gateTitle:{fontFamily:'sans-serif-condensed',fontWeight:'900',fontSize:25,lineHeight:27,color:paper,marginTop:9},gateText:{fontSize:10,lineHeight:16,color:'#D2DDD1',marginTop:7},gateButton:{minHeight:44,marginTop:15,paddingHorizontal:13,flexDirection:'row',alignItems:'center',justifyContent:'space-between',backgroundColor:orange,borderTopLeftRadius:5,borderTopRightRadius:20,borderBottomLeftRadius:20,borderBottomRightRadius:5},gateButtonText:{fontSize:8,fontWeight:'900',letterSpacing:.8,color:paper},gateButtonArrow:{fontSize:17,fontWeight:'900',color:paper},
+  photoStage:{padding:15,backgroundColor:'#EBE8DE',borderTopLeftRadius:5,borderTopRightRadius:30,borderBottomLeftRadius:30,borderBottomRightRadius:5},sectionKicker:{fontSize:7,fontWeight:'900',letterSpacing:1.2,color:green},photoEmpty:{height:226,marginTop:12,alignItems:'center',justifyContent:'center',padding:23,backgroundColor:'#E0E7DC',borderTopLeftRadius:5,borderTopRightRadius:46,borderBottomLeftRadius:46,borderBottomRightRadius:5},photoGlyph:{fontSize:44,color:orange,fontWeight:'300'},photoEmptyTitle:{fontFamily:'sans-serif-condensed',fontSize:18,fontWeight:'900',color:ink,marginTop:5,textAlign:'center'},photoEmptyText:{fontSize:9,lineHeight:14,color:quiet,textAlign:'center',marginTop:6,maxWidth:230},photoPreview:{height:320,width:'100%',marginTop:12,backgroundColor:'#D8D8CA',borderTopLeftRadius:5,borderTopRightRadius:46,borderBottomLeftRadius:46,borderBottomRightRadius:5},photoActions:{flexDirection:'row',gap:8,marginTop:11},photoButton:{flex:1,minHeight:43,paddingHorizontal:11,backgroundColor:ink,flexDirection:'row',alignItems:'center',justifyContent:'space-between',borderTopLeftRadius:4,borderTopRightRadius:19,borderBottomLeftRadius:19,borderBottomRightRadius:4},photoButtonText:{fontSize:7,fontWeight:'900',letterSpacing:.65,color:paper},photoButtonArrow:{fontSize:15,color:lime,fontWeight:'900'},photoButtonAlt:{backgroundColor:paper,borderWidth:1,borderColor:'#D4D5C8'},photoButtonAltText:{fontSize:7,fontWeight:'900',letterSpacing:.65,color:green},photoButtonAltArrow:{fontSize:15,color:orange,fontWeight:'900'},
+  consentRow:{flexDirection:'row',alignItems:'flex-start',gap:10,paddingVertical:15},consentBox:{width:21,height:21,borderWidth:1.5,borderColor:green,alignItems:'center',justifyContent:'center',marginTop:1},consentBoxChecked:{backgroundColor:green},consentCheck:{fontSize:14,fontWeight:'900',color:paper},consentText:{flex:1,fontSize:9,lineHeight:14,color:ink},privacyNote:{flexDirection:'row',gap:9,padding:12,backgroundColor:'#F0E6D8',borderLeftWidth:3,borderLeftColor:orange},privacyMark:{fontSize:16,fontWeight:'900',color:orange},privacyText:{flex:1,fontSize:8,lineHeight:13,color:'#626D63'},analyzeButton:{minHeight:52,marginTop:12,paddingHorizontal:16,backgroundColor:orange,flexDirection:'row',alignItems:'center',justifyContent:'space-between',borderTopLeftRadius:5,borderTopRightRadius:26,borderBottomLeftRadius:26,borderBottomRightRadius:5},analyzeButtonDisabled:{opacity:.48},analyzeButtonText:{fontSize:9,fontWeight:'900',letterSpacing:1,color:paper},analyzeButtonArrow:{fontSize:20,fontWeight:'900',color:paper},
+  historyHeading:{marginTop:29,marginBottom:13,flexDirection:'row',alignItems:'flex-end',justifyContent:'space-between'},historyTitle:{fontFamily:'sans-serif-condensed',fontSize:22,lineHeight:23,fontWeight:'900',color:ink,marginTop:4},historyCount:{fontSize:9,fontWeight:'900',letterSpacing:.8,color:orange},emptyHistory:{padding:17,backgroundColor:'#EBE8DE',borderTopLeftRadius:5,borderTopRightRadius:24,borderBottomLeftRadius:24,borderBottomRightRadius:5},emptyHistoryTitle:{fontFamily:'sans-serif-condensed',fontWeight:'900',fontSize:18,color:ink},emptyHistoryText:{fontSize:9,lineHeight:14,color:quiet,marginTop:5},
+  resultCard:{marginBottom:14,padding:15,backgroundColor:'#ECE9DF',borderTopLeftRadius:5,borderTopRightRadius:28,borderBottomLeftRadius:28,borderBottomRightRadius:5},resultTop:{flexDirection:'row',alignItems:'center',justifyContent:'space-between',paddingBottom:9,borderBottomWidth:1,borderBottomColor:'#D8D8CA'},resultNumber:{fontSize:7,fontWeight:'900',letterSpacing:1,color:green},resultDate:{fontSize:7,fontWeight:'900',color:orange},resultHeadline:{fontFamily:'sans-serif-condensed',fontSize:22,lineHeight:24,fontWeight:'900',color:ink,marginTop:13,marginBottom:8},resultLine:{flexDirection:'row',gap:6,marginTop:5},resultDot:{fontSize:18,lineHeight:16,color:orange},resultBody:{flex:1,fontSize:9,lineHeight:14,color:'#526057'},suggestionRow:{flexDirection:'row',gap:10,paddingVertical:11,borderTopWidth:1,borderTopColor:'#D8D8CA'},suggestionIndex:{fontFamily:'sans-serif-condensed',fontSize:14,fontWeight:'900',color:orange},suggestionCopy:{flex:1},suggestionTitle:{fontSize:9,fontWeight:'900',color:ink},suggestionDetail:{fontSize:9,lineHeight:14,color:quiet,marginTop:3},resultReminder:{fontSize:9,lineHeight:14,fontStyle:'italic',color:green,paddingTop:9,borderTopWidth:1,borderTopColor:'#D8D8CA'},deleteResult:{alignSelf:'flex-end',paddingTop:13,paddingLeft:12},deleteResultText:{fontSize:7,fontWeight:'900',letterSpacing:.8,color:'#9A5944'},
 });
 
 const e = StyleSheet.create({

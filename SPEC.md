@@ -63,7 +63,7 @@ Os limites, preços e custos por análise ainda precisam ser medidos. Pagamentos
 1. Validar identidade visual, animações e fluxo com o usuário.
 2. Concluído em parte: onboarding, edição de perfil, autenticação por e-mail/senha e sincronização do perfil e do histórico recente com Supabase, protegidos por RLS.
 3. Adicionar tradução real para português, inglês e espanhol.
-4. Concluído em parte: tabelas `profiles` e `daily_progress` e políticas RLS foram aplicadas no Supabase. Armazenamento privado continua pendente.
-5. Implementar análise com consentimento, limites e chamada segura à OpenAI.
+4. Concluído em parte: tabelas `profiles` e `daily_progress` e políticas RLS já foram aplicadas no Supabase. A migração da análise também define uma tabela protegida por RLS e um bucket temporário privado para as fotos; falta aplicar essa nova migração no projeto conectado.
+5. Implementado no app e no servidor: análise visual com consentimento, limite de uso, função Supabase, armazenamento privado e remoção da foto temporária. Falta aplicar a migração, configurar `OPENAI_API_KEY` como segredo do Supabase e publicar a função no projeto conectado.
 6. Concluído em parte: perfil, hábitos, missão e histórico recente ficam salvos localmente e sincronizados quando há conta. A aba Evolução exibe até 30 dias; a conta busca até 90 dias para manter a memória entre aparelhos. Próximo: histórico completo e exclusão de dados.
 7. Medir custo real antes de definir limites Premium e pagamentos.

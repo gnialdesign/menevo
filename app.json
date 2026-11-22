@@ -1,0 +1,29 @@
+{
+  "expo": {
+    "name": "Men's Evolution",
+    "slug": "mens-evolution",
+    "scheme": "mensevolution",
+    "version": "1.0.0",
+    "orientation": "portrait",
+    "userInterfaceStyle": "dark",
+    "plugins": [
+      "expo-router"
+    ],
+    "experiments": {
+      "typedRoutes": true
+    },
+    "ios": {
+      "supportsTablet": true,
+      "bundleIdentifier": "com.mensevolution.app"
+    },
+    "android": {
+      "package": "com.mensevolution.app",
+      "adaptiveIcon": {
+        "backgroundColor": "#151719"
+      }
+    },
+    "web": {
+      "bundler": "metro"
+    }
+  }
+}

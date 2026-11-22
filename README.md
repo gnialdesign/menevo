@@ -1,0 +1,34 @@
+# Men's Evolution — MVP navegável
+
+Protótipo mobile em React Native + Expo para Android, iOS e web. Esta primeira entrega demonstra a navegação, painel diário, rotina com hábitos marcáveis, visão de progresso e perfil.
+
+## Executar
+
+1. Instale Node.js LTS e Expo Go no celular, ou configure um emulador.
+2. Nesta pasta, execute `npm install`.
+3. Execute `npm run start` e abra o QR code com Expo Go.
+4. Para visualizar no navegador, execute `npm run web`.
+
+## Conta e sincronização
+
+O app continua funcionando sem conta e mantém perfil e progresso localmente. Para ativar cadastro, entrada e sincronização:
+
+1. Crie um projeto Supabase e copie a URL do projeto e a chave **publishable** (nunca use a `service_role` no app).
+2. Duplique `.env.example` como `.env` e preencha `EXPO_PUBLIC_SUPABASE_URL` e `EXPO_PUBLIC_SUPABASE_PUBLISHABLE_KEY`.
+3. No painel do Supabase, abra o SQL Editor e execute `supabase/migrations/20261122000100_account_sync.sql`.
+4. Reinicie o Expo para carregar as variáveis. No Perfil, toque em **Preparar conta** para criar uma conta ou entrar.
+
+O login sincroniza o perfil e até 90 dias de progresso recente. A aba Evolução mostra os últimos 30 dias registrados. As políticas RLS limitam cada conta aos próprios registros. O progresso continua salvo no aparelho e disponível offline.
+
+## Escopo desta entrega
+
+- Interface demonstrativa editorial e experimental: retrato de campanha, recortes orgânicos, tipografia condensada, verde e laranja, sem conjunto de ícones genérico.
+- Navegação entre Início, Rotina, Evolução e Perfil.
+- Primeira entrada com nome e foco escolhido; o perfil pode ser ajustado depois e fica salvo localmente no aparelho.
+- Hábitos e missão concluída ficam salvos localmente por dia e continuam marcados ao reabrir o app.
+- A edição diária combina uma imagem autoral e uma missão correspondente. Há 30 combinações; a ordem é embaralhada por mês, fica estável durante o dia e percorre as 30 sem repetição antes de recomeçar. No dia 31, a primeira combinação do ciclo volta.
+- A revelação da missão tem entrada animada; a evolução mostra uma árvore de fases tocável.
+- Conta por e-mail e senha e sincronização de perfil/progresso recente estão implementadas; exigem as variáveis do Supabase e a migração SQL acima.
+- A aba Evolução exibe até 30 dias do histórico local e sincronizado.
+- Telas de análise, pagamentos e chamadas de IA ainda não estão conectados; serão próximas etapas do produto.
+- Os números exibidos são demonstrativos.

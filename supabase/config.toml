@@ -1,2 +1,5 @@
 [functions.analyze-appearance]
 verify_jwt = true
+
+[functions.erase-synced-data]
+verify_jwt = true

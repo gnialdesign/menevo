@@ -28,10 +28,12 @@ Para ativar o recurso no projeto Supabase:
 
 1. Execute `supabase/migrations/20261122000200_appearance_analysis.sql` no SQL Editor do Supabase.
 2. Em **Project Settings → Edge Functions → Secrets**, adicione `OPENAI_API_KEY`. Use uma chave da API da OpenAI; não a coloque no `.env` do app nem no repositório.
-3. Instale/autentique o Supabase CLI, vincule-o ao projeto e publique `supabase/functions/analyze-appearance` com `npx supabase functions deploy analyze-appearance`.
+3. Instale/autentique o Supabase CLI, vincule-o ao projeto e publique as funções `analyze-appearance` e `erase-synced-data` com `npx supabase functions deploy analyze-appearance` e `npx supabase functions deploy erase-synced-data`.
 4. Reinicie o Expo. A leitura usa a Responses API com `gpt-4o-mini`; a chamada acontece somente na função do servidor.
 
 O app não envia a foto sem a caixa de consentimento marcada. O resultado oferece observações e ideias de apresentação pessoal; não pontua aparência nem faz diagnósticos.
+
+No Perfil, **Apagar dados da nuvem** remove perfil sincronizado, progresso, resultados de análise e arquivos temporários privados, sem excluir a conta nem os dados locais. Após a remoção, a sincronização fica pausada neste aparelho; o usuário pode retomá-la manualmente. Outros aparelhos podem manter dados locais e reenviá-los quando sincronizarem.
 
 ## Escopo desta entrega
 

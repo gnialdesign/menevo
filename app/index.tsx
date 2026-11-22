@@ -13,6 +13,7 @@ type AppearanceAdvice = { headline: string; observations: string[]; suggestions:
 type AppearanceRecord = { id: string; status: string; result: AppearanceAdvice | null; created_at: string };
 const profileStorageKey = 'mens-evolution-profile-v1';
 const progressStoragePrefix = 'mens-evolution-progress-';
+const syncPauseStoragePrefix = 'mens-evolution-sync-paused-v1:';
 const profileGoals = ['Autocuidado', 'Movimento', 'Estilo', 'Rotina'];
 const ink = '#123E39';
 const green = '#16705A';
@@ -138,6 +139,10 @@ export default function Home() {
   const [missionDone, setMissionDone] = useState(false);
   const [notice, setNotice] = useState('');
   const [session, setSession] = useState<Session | null>(null);
+  const [cloudSyncPaused, setCloudSyncPaused] = useState(false);
+  const [syncPreferenceLoaded, setSyncPreferenceLoaded] = useState(false);
+  const [dataDeleteExpanded, setDataDeleteExpanded] = useState(false);
+  const [dataDeleteBusy, setDataDeleteBusy] = useState(false);
   const [analysisPhotoUri, setAnalysisPhotoUri] = useState<string | null>(null);
   const [analysisConsent, setAnalysisConsent] = useState(false);
   const [analysisBusy, setAnalysisBusy] = useState(false);
@@ -174,7 +179,8 @@ export default function Home() {
   const showNotice = (message: string) => { setNotice(message); setTimeout(() => setNotice(''), 2400); };
 
   const syncAccountData = async (userId: string) => {
-    if (!supabase || !profile) return;
+    if (!supabase || !profile) return false;
+    if (await AsyncStorage.getItem(`${syncPauseStoragePrefix}${userId}`) === 'true') { setCloudSyncPaused(true); return false; }
     syncedUser.current = userId;
     const { data: remoteProfile, error: profileReadError } = await supabase.from('profiles').select('display_name,focus').eq('user_id', userId).maybeSingle();
     if (profileReadError) throw profileReadError;
@@ -211,6 +217,7 @@ export default function Home() {
     await Promise.all(mergedHistory.map((record) => AsyncStorage.setItem(`${progressStoragePrefix}${record.local_date}`, JSON.stringify({ done: record.done, missionDone: record.missionDone, updatedAt: record.updatedAt }))));
     const { error: progressWriteError } = await supabase.from('daily_progress').upsert(mergedHistory.map((record) => ({ user_id: userId, local_date: record.local_date, completed_task_ids: record.done, mission_done: record.missionDone, updated_at: record.updatedAt })));
     if (progressWriteError) throw progressWriteError;
+    return true;
   };
 
   const submitAuth = async () => {
@@ -224,10 +231,10 @@ export default function Home() {
         if (error) throw error;
         if (data.session) {
           setSession(data.session);
-          await syncAccountData(data.user.id);
+          const synced = await syncAccountData(data.user.id);
           setAccountMode(null);
           setAuthMessage('');
-          showNotice('Conta criada e dados sincronizados.');
+          showNotice(synced ? 'Conta criada e dados sincronizados.' : 'Conta criada. A sincronização está pausada neste aparelho.');
         } else {
           setAuthMessage('Conta criada. Confirme o e-mail e depois entre.');
           setAccountMode('signin');
@@ -237,10 +244,10 @@ export default function Home() {
         if (error) throw error;
         if (data.session) {
           setSession(data.session);
-          await syncAccountData(data.user.id);
+          const synced = await syncAccountData(data.user.id);
           setAccountMode(null);
           setAuthMessage('');
-          showNotice('Conta conectada e dados sincronizados.');
+          showNotice(synced ? 'Conta conectada e dados sincronizados.' : 'Conta conectada. A sincronização está pausada neste aparelho.');
         }
       }
     } catch (error) {
@@ -263,8 +270,39 @@ export default function Home() {
 
   const retrySync = async () => {
     if (!session?.user.id) return;
-    try { await syncAccountData(session.user.id); showNotice('Perfil e progresso sincronizados.'); }
+    try {
+      await AsyncStorage.removeItem(`${syncPauseStoragePrefix}${session.user.id}`);
+      setCloudSyncPaused(false);
+      syncedUser.current = null;
+      await syncAccountData(session.user.id);
+      showNotice('Sincronização reativada.');
+    }
     catch (error) { syncedUser.current = null; showNotice(error instanceof Error ? `Sincronização: ${error.message}` : 'Não foi possível sincronizar agora.'); }
+  };
+
+  const eraseSyncedData = async () => {
+    if (!supabase || !session?.user.id) return;
+    setDataDeleteBusy(true);
+    const pauseKey = `${syncPauseStoragePrefix}${session.user.id}`;
+    let pauseWritten = false;
+    try {
+      await AsyncStorage.setItem(pauseKey, 'true');
+      pauseWritten = true;
+      setCloudSyncPaused(true);
+      const { data, error } = await supabase.functions.invoke('erase-synced-data', { body: {} });
+      if (error) {
+        let serverMessage = '';
+        try { serverMessage = (await error.context?.clone().json())?.error ?? ''; } catch { /* use the generic function error below */ }
+        throw new Error(serverMessage || error.message);
+      }
+      if (data?.error) throw new Error(data.error);
+      syncedUser.current = session.user.id;
+      setDataDeleteExpanded(false);
+      showNotice('Dados da nuvem apagados. Sincronização pausada.');
+    } catch {
+      if (pauseWritten) setCloudSyncPaused(true);
+      showNotice(pauseWritten ? 'Não foi possível concluir. A sincronização segue pausada; você pode tentar novamente.' : 'Não foi possível salvar a preferência. Tente novamente.');
+    } finally { setDataDeleteBusy(false); }
   };
 
   const loadAppearanceHistory = async (userId: string) => {
@@ -350,6 +388,25 @@ export default function Home() {
   }, []);
 
   useEffect(() => {
+    let active = true;
+    const userId = session?.user.id;
+    setSyncPreferenceLoaded(false);
+    if (!userId) {
+      setCloudSyncPaused(false);
+      setSyncPreferenceLoaded(true);
+      return () => { active = false; };
+    }
+    AsyncStorage.getItem(`${syncPauseStoragePrefix}${userId}`).then((value) => {
+      if (active) setCloudSyncPaused(value === 'true');
+    }).catch(() => {
+      if (active) setCloudSyncPaused(false);
+    }).finally(() => {
+      if (active) setSyncPreferenceLoaded(true);
+    });
+    return () => { active = false; };
+  }, [session?.user.id]);
+
+  useEffect(() => {
     if (!session?.user.id) { setAnalysisRecords([]); setAnalysisHistoryBusy(false); return; }
     let active = true;
     setAnalysisHistoryBusy(true);
@@ -361,19 +418,19 @@ export default function Home() {
   }, [session?.user.id]);
 
   useEffect(() => {
-    if (!session?.user.id || !profile || !profileLoaded || !progressLoaded || !historyLoaded || syncedUser.current === session.user.id) return;
+    if (!session?.user.id || !profile || !profileLoaded || !progressLoaded || !historyLoaded || !syncPreferenceLoaded || cloudSyncPaused || syncedUser.current === session.user.id) return;
     syncAccountData(session.user.id).catch((error) => { syncedUser.current = null; showNotice(error instanceof Error ? `Sincronização: ${error.message}` : 'Não foi possível sincronizar agora.'); });
-  }, [session?.user.id, profile, profileLoaded, progressLoaded, historyLoaded]);
+  }, [session?.user.id, profile, profileLoaded, progressLoaded, historyLoaded, syncPreferenceLoaded, cloudSyncPaused]);
 
   useEffect(() => {
-    if (!supabase || !session?.user.id || syncedUser.current !== session.user.id || !profile) return;
+    if (!supabase || !session?.user.id || !syncPreferenceLoaded || cloudSyncPaused || syncedUser.current !== session.user.id || !profile) return;
     supabase.from('profiles').upsert({ user_id: session.user.id, display_name: profile.name, focus: profile.goal, updated_at: new Date().toISOString() }).then(({ error }) => { if (error) showNotice('Perfil salvo no aparelho; sincronização pendente.'); });
-  }, [profile, session?.user.id]);
+  }, [profile, session?.user.id, syncPreferenceLoaded, cloudSyncPaused]);
 
   useEffect(() => {
-    if (!supabase || !session?.user.id || syncedUser.current !== session.user.id || !progressLoaded) return;
+    if (!supabase || !session?.user.id || !syncPreferenceLoaded || cloudSyncPaused || syncedUser.current !== session.user.id || !progressLoaded) return;
     supabase.from('daily_progress').upsert({ user_id: session.user.id, local_date: todayLocalDate, completed_task_ids: done, mission_done: missionDone, updated_at: progressUpdatedAt }).then(({ error }) => { if (error) showNotice('Progresso salvo no aparelho; sincronização pendente.'); });
-  }, [done, missionDone, progressLoaded, progressUpdatedAt, session?.user.id]);
+  }, [done, missionDone, progressLoaded, progressUpdatedAt, session?.user.id, syncPreferenceLoaded, cloudSyncPaused]);
 
   useEffect(() => {
     let mounted = true;
@@ -670,7 +727,21 @@ export default function Home() {
     {tab === 'Perfil' && <ScrollView contentContainerStyle={s.content} showsVerticalScrollIndicator={false}>
       <PageHeading eyebrow="SEU ESPAÇO" title="DO SEU JEITO." subtitle="Ajuste o app para combinar com você." />
       <View style={s.profileBanner}><Text style={s.profileMono}>{profile.name.trim().split(/\s+/).map((part) => part[0]).slice(0, 2).join('').toUpperCase()}</Text><View style={s.profileIdentity}><Text style={s.profileTitle}>{profile.name}</Text><Text style={s.profileSubtitle}>Foco: {profile.goal}</Text></View><TouchableOpacity onPress={openProfileEditor}><Text style={s.editLink}>EDITAR ↗</Text></TouchableOpacity></View>
-      <View style={s.accountCard}><View style={s.accountCardTop}><Text style={s.accountKicker}>CONTA / SINCRONIZAÇÃO</Text><View style={[s.accountDot, session && s.accountDotOn]} /></View><Text style={s.accountTitle}>{session ? 'SUA EVOLUÇÃO ESTÁ CONECTADA.' : 'LEVE SEU CAMINHO COM VOCÊ.'}</Text><Text style={s.accountDescription}>{session ? session.user.email : 'Entre ou crie uma conta para sincronizar perfil e progresso diário entre aparelhos.'}</Text><View style={s.accountActions}>{session ? <><TouchableOpacity onPress={retrySync} style={[s.accountButton, s.accountButtonHalf]}><Text style={s.accountButtonText}>SINCRONIZAR</Text><Text style={s.accountButtonArrow}>↻</Text></TouchableOpacity><TouchableOpacity onPress={signOut} style={[s.accountButton, s.accountButtonHalf, s.accountButtonGhost]}><Text style={s.accountButtonText}>SAIR</Text><Text style={s.accountButtonArrow}>↗</Text></TouchableOpacity></> : <TouchableOpacity onPress={() => { setAuthEmail(''); setAuthPassword(''); setAuthMessage(''); setAuthError(false); setAccountMode('signup'); }} style={s.accountButton}><Text style={s.accountButtonText}>{hasSupabaseConfig ? 'CRIAR CONTA / ENTRAR' : 'PREPARAR CONTA'}</Text><Text style={s.accountButtonArrow}>↗</Text></TouchableOpacity>}</View><Text style={s.accountFootnote}>{session ? 'DADOS NESTE APARELHO + NA NUVEM' : 'SEM CONTA, NADA SAI DESTE APARELHO'}</Text></View>
+      <View style={s.accountCard}><View style={s.accountCardTop}><Text style={s.accountKicker}>CONTA / SINCRONIZAÇÃO</Text><View style={[s.accountDot, session && s.accountDotOn]} /></View><Text style={s.accountTitle}>{session ? 'SUA EVOLUÇÃO ESTÁ CONECTADA.' : 'LEVE SEU CAMINHO COM VOCÊ.'}</Text><Text style={s.accountDescription}>{session ? session.user.email : 'Entre ou crie uma conta para sincronizar perfil e progresso diário entre aparelhos.'}</Text><View style={s.accountActions}>{session ? <><TouchableOpacity onPress={retrySync} style={[s.accountButton, s.accountButtonHalf]}><Text style={s.accountButtonText}>{cloudSyncPaused ? 'RETOMAR SYNC' : 'SINCRONIZAR'}</Text><Text style={s.accountButtonArrow}>↻</Text></TouchableOpacity><TouchableOpacity onPress={signOut} style={[s.accountButton, s.accountButtonHalf, s.accountButtonGhost]}><Text style={s.accountButtonText}>SAIR</Text><Text style={s.accountButtonArrow}>↗</Text></TouchableOpacity></> : <TouchableOpacity onPress={() => { setAuthEmail(''); setAuthPassword(''); setAuthMessage(''); setAuthError(false); setAccountMode('signup'); }} style={s.accountButton}><Text style={s.accountButtonText}>{hasSupabaseConfig ? 'CRIAR CONTA / ENTRAR' : 'PREPARAR CONTA'}</Text><Text style={s.accountButtonArrow}>↗</Text></TouchableOpacity>}</View><Text style={s.accountFootnote}>{session ? cloudSyncPaused ? 'CÓPIAS LOCAIS / SINCRONIZAÇÃO PAUSADA' : 'DADOS NESTE APARELHO + NA NUVEM' : 'SEM CONTA, NADA SAI DESTE APARELHO'}</Text></View>
+      <View style={d.dataCard}>
+        <View style={d.dataHeading}><Text style={d.dataKicker}>PRIVACIDADE / SEUS DADOS</Text><Text style={d.dataGlyph}>↘</Text></View>
+        <Text style={d.dataTitle}>APAGAR DADOS DA NUVEM.</Text>
+        <Text style={d.dataDescription}>Remove do Men’s Evolution seu perfil sincronizado, registros diários, resultados da análise e fotos temporárias pendentes.</Text>
+        {session ? <>
+          {cloudSyncPaused ? <Text style={d.dataStatus}>SINCRONIZAÇÃO PAUSADA NESTE APARELHO.</Text> : null}
+          {!dataDeleteExpanded ? <TouchableOpacity disabled={dataDeleteBusy} onPress={() => setDataDeleteExpanded(true)} style={d.dataAction}><Text style={d.dataActionText}>REVISAR E APAGAR</Text><Text style={d.dataActionArrow}>↗</Text></TouchableOpacity> : <View style={d.dataConfirm}>
+            <Text style={d.dataConfirmTitle}>ANTES DE APAGAR</Text>
+            <Text style={d.dataConfirmText}>Sua conta e os dados salvos neste aparelho continuam. A sincronização deste aparelho será pausada. Outros aparelhos ainda podem ter cópias locais e reenviá-las se sincronizarem. Dados processados pela OpenAI seguem as políticas próprias do serviço.</Text>
+            <TouchableOpacity disabled={dataDeleteBusy} onPress={eraseSyncedData} style={[d.dataAction, d.dataActionDanger, dataDeleteBusy && d.dataActionDisabled]}><Text style={d.dataActionText}>{dataDeleteBusy ? 'APAGANDO…' : 'APAGAR DA NUVEM'}</Text><Text style={d.dataActionArrow}>{dataDeleteBusy ? '···' : '×'}</Text></TouchableOpacity>
+            <TouchableOpacity disabled={dataDeleteBusy} onPress={() => setDataDeleteExpanded(false)} style={d.dataCancel}><Text style={d.dataCancelText}>CANCELAR</Text></TouchableOpacity>
+          </View>}
+        </> : <TouchableOpacity onPress={() => { setAuthEmail(''); setAuthPassword(''); setAuthMessage(''); setAuthError(false); setAccountMode('signin'); }} style={d.dataAction}><Text style={d.dataActionText}>ENTRAR PARA CONTINUAR</Text><Text style={d.dataActionArrow}>↗</Text></TouchableOpacity>}
+      </View>
       <View style={s.todaySection}><Text style={s.sectionTitle}>PREFERÊNCIAS</Text></View>
       {[['IDIOMA', 'Português (Brasil)'], ['LEMBRETES', 'Ativados'], ['PRIVACIDADE', 'Seus dados são seus'], ['AJUDA', 'Suporte e respostas']].map(([label, value], i) => <TouchableOpacity key={label} style={[s.preferenceRow, i < 3 && s.rowRule]} onPress={() => showNotice(`${label}: configuração em breve.`)}><Text style={s.preferenceLabel}>{label}</Text><Text style={s.preferenceValue}>{value}</Text><Text style={s.preferenceArrow}>↗</Text></TouchableOpacity>)}
       <View style={s.profilePlan}><Text style={s.profilePlanLabel}>PLANO ATUAL</Text><Text style={s.profilePlanTitle}>Evolução gratuita</Text><Text style={s.profilePlanSub}>Seu primeiro passo começa aqui.</Text></View>
@@ -706,6 +777,14 @@ const a = StyleSheet.create({
   consentRow:{flexDirection:'row',alignItems:'flex-start',gap:10,paddingVertical:15},consentBox:{width:21,height:21,borderWidth:1.5,borderColor:green,alignItems:'center',justifyContent:'center',marginTop:1},consentBoxChecked:{backgroundColor:green},consentCheck:{fontSize:14,fontWeight:'900',color:paper},consentText:{flex:1,fontSize:9,lineHeight:14,color:ink},privacyNote:{flexDirection:'row',gap:9,padding:12,backgroundColor:'#F0E6D8',borderLeftWidth:3,borderLeftColor:orange},privacyMark:{fontSize:16,fontWeight:'900',color:orange},privacyText:{flex:1,fontSize:8,lineHeight:13,color:'#626D63'},analyzeButton:{minHeight:52,marginTop:12,paddingHorizontal:16,backgroundColor:orange,flexDirection:'row',alignItems:'center',justifyContent:'space-between',borderTopLeftRadius:5,borderTopRightRadius:26,borderBottomLeftRadius:26,borderBottomRightRadius:5},analyzeButtonDisabled:{opacity:.48},analyzeButtonText:{fontSize:9,fontWeight:'900',letterSpacing:1,color:paper},analyzeButtonArrow:{fontSize:20,fontWeight:'900',color:paper},
   historyHeading:{marginTop:29,marginBottom:13,flexDirection:'row',alignItems:'flex-end',justifyContent:'space-between'},historyTitle:{fontFamily:'sans-serif-condensed',fontSize:22,lineHeight:23,fontWeight:'900',color:ink,marginTop:4},historyCount:{fontSize:9,fontWeight:'900',letterSpacing:.8,color:orange},emptyHistory:{padding:17,backgroundColor:'#EBE8DE',borderTopLeftRadius:5,borderTopRightRadius:24,borderBottomLeftRadius:24,borderBottomRightRadius:5},emptyHistoryTitle:{fontFamily:'sans-serif-condensed',fontWeight:'900',fontSize:18,color:ink},emptyHistoryText:{fontSize:9,lineHeight:14,color:quiet,marginTop:5},
   resultCard:{marginBottom:14,padding:15,backgroundColor:'#ECE9DF',borderTopLeftRadius:5,borderTopRightRadius:28,borderBottomLeftRadius:28,borderBottomRightRadius:5},resultTop:{flexDirection:'row',alignItems:'center',justifyContent:'space-between',paddingBottom:9,borderBottomWidth:1,borderBottomColor:'#D8D8CA'},resultNumber:{fontSize:7,fontWeight:'900',letterSpacing:1,color:green},resultDate:{fontSize:7,fontWeight:'900',color:orange},resultHeadline:{fontFamily:'sans-serif-condensed',fontSize:22,lineHeight:24,fontWeight:'900',color:ink,marginTop:13,marginBottom:8},resultLine:{flexDirection:'row',gap:6,marginTop:5},resultDot:{fontSize:18,lineHeight:16,color:orange},resultBody:{flex:1,fontSize:9,lineHeight:14,color:'#526057'},suggestionRow:{flexDirection:'row',gap:10,paddingVertical:11,borderTopWidth:1,borderTopColor:'#D8D8CA'},suggestionIndex:{fontFamily:'sans-serif-condensed',fontSize:14,fontWeight:'900',color:orange},suggestionCopy:{flex:1},suggestionTitle:{fontSize:9,fontWeight:'900',color:ink},suggestionDetail:{fontSize:9,lineHeight:14,color:quiet,marginTop:3},resultReminder:{fontSize:9,lineHeight:14,fontStyle:'italic',color:green,paddingTop:9,borderTopWidth:1,borderTopColor:'#D8D8CA'},deleteResult:{alignSelf:'flex-end',paddingTop:13,paddingLeft:12},deleteResultText:{fontSize:7,fontWeight:'900',letterSpacing:.8,color:'#9A5944'},
+});
+
+const d = StyleSheet.create({
+  dataCard:{padding:16,marginTop:1,backgroundColor:'#EEE7DA',borderTopLeftRadius:30,borderTopRightRadius:5,borderBottomLeftRadius:5,borderBottomRightRadius:30},
+  dataHeading:{flexDirection:'row',alignItems:'center',justifyContent:'space-between'},dataKicker:{fontSize:7,fontWeight:'900',letterSpacing:1.2,color:'#9A5944'},dataGlyph:{fontSize:20,fontWeight:'900',color:orange},
+  dataTitle:{fontFamily:'sans-serif-condensed',fontWeight:'900',fontSize:22,lineHeight:24,color:ink,marginTop:9},dataDescription:{fontSize:9,lineHeight:14,color:'#626D63',marginTop:5},dataStatus:{fontSize:7,fontWeight:'900',letterSpacing:.9,color:green,marginTop:13},
+  dataAction:{minHeight:42,marginTop:14,paddingHorizontal:13,backgroundColor:ink,flexDirection:'row',alignItems:'center',justifyContent:'space-between',borderTopLeftRadius:4,borderTopRightRadius:19,borderBottomLeftRadius:19,borderBottomRightRadius:4},dataActionText:{fontSize:8,fontWeight:'900',letterSpacing:.8,color:paper},dataActionArrow:{fontSize:16,fontWeight:'900',color:lime},
+  dataConfirm:{marginTop:15,padding:13,backgroundColor:'#F6F1E7',borderLeftWidth:3,borderLeftColor:orange},dataConfirmTitle:{fontSize:7,fontWeight:'900',letterSpacing:1,color:'#9A5944'},dataConfirmText:{fontSize:9,lineHeight:14,color:'#59655C',marginTop:6},dataActionDanger:{backgroundColor:'#9A4936'},dataActionDisabled:{opacity:.55},dataCancel:{alignSelf:'center',padding:11},dataCancelText:{fontSize:7,fontWeight:'900',letterSpacing:1,color:green},
 });
 
 const e = StyleSheet.create({

@@ -18,22 +18,22 @@ O app continua funcionando sem conta e mantém perfil e progresso localmente. Pa
 3. No painel do Supabase, abra o SQL Editor e execute `supabase/migrations/20261122000100_account_sync.sql`.
 4. Reinicie o Expo para carregar as variáveis. No Perfil, toque em **Preparar conta** para criar uma conta ou entrar.
 
-O login sincroniza o perfil e até 90 dias de progresso recente. A aba Evolução mostra os últimos 30 dias registrados. As políticas RLS limitam cada conta aos próprios registros. O progresso continua salvo no aparelho e disponível offline.
+O login sincroniza o perfil e até 90 dias de progresso recente. A aba Evolução mostra os registros dentro dos últimos 30 dias corridos no plano gratuito; o histórico completo fica reservado para um Premium futuro. As políticas RLS limitam cada conta aos próprios registros. O progresso continua salvo no aparelho e disponível offline.
 
 ## Análise visual
 
 A tela **Análise** exige uma conta conectada, consentimento explícito e uma foto JPEG de até 8 MB. Ela envia a imagem ao bucket privado `analysis-photos`, chama a função `analyze-appearance` no Supabase e apaga o arquivo temporário após o processamento. O histórico guarda apenas o resultado; cada resultado pode ser apagado pelo próprio usuário. Há um limite inicial de três solicitações em 24 horas.
 
-Para ativar o recurso no projeto Supabase:
+Para ativar a análise visual no projeto Supabase:
 
-1. Execute `supabase/migrations/20261122000200_appearance_analysis.sql` no SQL Editor do Supabase.
+1. A migração `supabase/migrations/20261122000200_appearance_analysis.sql` já foi aplicada no projeto Supabase conectado.
 2. Em **Project Settings → Edge Functions → Secrets**, adicione `OPENAI_API_KEY`. Use uma chave da API da OpenAI; não a coloque no `.env` do app nem no repositório.
-3. Instale/autentique o Supabase CLI, vincule-o ao projeto e publique as funções `analyze-appearance` e `erase-synced-data` com `npx supabase functions deploy analyze-appearance` e `npx supabase functions deploy erase-synced-data`.
+3. Autentique o Supabase CLI, vincule-o ao projeto e publique `analyze-appearance` com `npx supabase functions deploy analyze-appearance`. A função `erase-synced-data` já está publicada.
 4. Reinicie o Expo. A leitura usa a Responses API com `gpt-4o-mini`; a chamada acontece somente na função do servidor.
 
 O app não envia a foto sem a caixa de consentimento marcada. O resultado oferece observações e ideias de apresentação pessoal; não pontua aparência nem faz diagnósticos.
 
-No Perfil, **Apagar dados da nuvem** remove perfil sincronizado, progresso, resultados de análise e arquivos temporários privados, sem excluir a conta nem os dados locais. Após a remoção, a sincronização fica pausada neste aparelho; o usuário pode retomá-la manualmente. Outros aparelhos podem manter dados locais e reenviá-los quando sincronizarem.
+No Perfil, **Apagar dados da nuvem** remove perfil sincronizado, progresso, resultados de análise e arquivos temporários privados, sem excluir a conta nem os dados locais. A função já está publicada no projeto conectado. Após a remoção, a sincronização fica pausada neste aparelho; o usuário pode retomá-la manualmente. Outros aparelhos podem manter dados locais e reenviá-los quando sincronizarem.
 
 ## Escopo desta entrega
 

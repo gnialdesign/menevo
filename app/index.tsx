@@ -1,9 +1,10 @@
 import { Children, cloneElement, createContext, isValidElement, useContext, useEffect, useRef, useState, type ReactNode } from 'react';
 import AsyncStorage from '@react-native-async-storage/async-storage';
-import { Animated, Easing, Image, ImageBackground, ScrollView, StatusBar, StyleSheet, Text as NativeText, TextInput, TouchableOpacity, View, type TextProps } from 'react-native';
+import { Animated, Easing, Image, ImageBackground, Platform, ScrollView, StatusBar, StyleSheet, Text as NativeText, TextInput, TouchableOpacity, View, type TextProps } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import type { Session } from '@supabase/supabase-js';
 import * as ImagePicker from 'expo-image-picker';
+import * as Notifications from 'expo-notifications';
 import { hasSupabaseConfig, supabase } from '../lib/supabase';
 import { intlLocales, localeOptions, translate, type Locale } from '../lib/locales';
 
@@ -16,6 +17,9 @@ const profileStorageKey = 'mens-evolution-profile-v1';
 const localeStorageKey = 'mens-evolution-locale-v1';
 const progressStoragePrefix = 'mens-evolution-progress-';
 const syncPauseStoragePrefix = 'mens-evolution-sync-paused-v1:';
+const reminderStorageKey = 'mens-evolution-water-reminder-v1';
+const reminderNotificationTag = 'daily-water-reminder';
+const reminderTimes = ['08:00', '12:00', '16:00', '20:00'];
 const profileGoals = ['Autocuidado', 'Movimento', 'Estilo', 'Rotina'];
 const ink = '#123E39';
 const green = '#16705A';
@@ -98,6 +102,9 @@ function getDailyEdition(date: Date) {
 const dailyEdition = getDailyEdition(todayDate);
 const easterEggMessages = ['O começo já conta.', 'Seu ritmo também é progresso.', 'Um detalhe muda o dia.', 'Não precisa ser perfeito pra valer.', 'Você voltou. Isso importa.', 'O próximo passo pode ser pequeno.'];
 const dailyEasterEgg = easterEggMessages[hashSeed(`${todayDate.getFullYear()}-${todayDate.getMonth() + 1}-${todayDate.getDate()}-easter-egg`) % easterEggMessages.length];
+Notifications.setNotificationHandler({
+  handleNotification: async () => ({ shouldShowBanner: true, shouldShowList: true, shouldPlaySound: false, shouldSetBadge: false }),
+});
 const tasks = [
   { id: 1, title: 'Limpeza facial', detail: 'CUIDADO · 2 MIN' },
   { id: 2, title: 'Hidratar a pele', detail: 'CUIDADO · 1 MIN' },
@@ -139,6 +146,10 @@ export default function Home() {
   const [tab, setTab] = useState<Tab>('Início');
   const [locale, setLocale] = useState<Locale>('pt-BR');
   const [localeLoaded, setLocaleLoaded] = useState(false);
+  const [waterReminderEnabled, setWaterReminderEnabled] = useState(false);
+  const [waterReminderTime, setWaterReminderTime] = useState('12:00');
+  const [waterReminderExpanded, setWaterReminderExpanded] = useState(false);
+  const [remindersLoaded, setRemindersLoaded] = useState(false);
   const [profile, setProfile] = useState<UserProfile | null>(null);
   const [profileLoaded, setProfileLoaded] = useState(false);
   const [progressLoaded, setProgressLoaded] = useState(false);
@@ -210,6 +221,40 @@ export default function Home() {
     setLocale(nextLocale);
     try { await AsyncStorage.setItem(localeStorageKey, nextLocale); }
     catch { showNotice(translate('Não foi possível salvar a preferência. Tente novamente.', nextLocale)); }
+  };
+
+  const toggleWaterReminder = async () => {
+    if (waterReminderEnabled) {
+      setWaterReminderEnabled(false);
+      showNotice(translate('Lembrete diário desligado.', locale));
+      return;
+    }
+    if (Platform.OS === 'web') {
+      showNotice(translate('Lembretes funcionam no app para celular.', locale));
+      return;
+    }
+    try {
+      if (Platform.OS === 'android') {
+        await Notifications.setNotificationChannelAsync('daily-reminders', {
+          name: translate('Lembretes diários', locale),
+          importance: Notifications.AndroidImportance.DEFAULT,
+        });
+      }
+      const existing = await Notifications.getPermissionsAsync();
+      const permission = existing.status === 'granted' ? existing : await Notifications.requestPermissionsAsync();
+      if (permission.status !== 'granted') {
+        showNotice(translate('Permita notificações nas configurações do aparelho.', locale));
+        return;
+      }
+      setWaterReminderEnabled(true);
+      showNotice(translate('Lembrete diário ativado.', locale));
+    } catch {
+      showNotice(translate('Não foi possível ativar o lembrete.', locale));
+    }
+  };
+
+  const updateWaterReminderTime = (time: string) => {
+    setWaterReminderTime(time);
   };
 
   const syncAccountData = async (userId: string) => {
@@ -422,6 +467,47 @@ export default function Home() {
   }, []);
 
   useEffect(() => {
+    let mounted = true;
+    AsyncStorage.getItem(reminderStorageKey).then((value) => {
+      if (!mounted || !value) return;
+      const saved = JSON.parse(value) as { enabled?: unknown; time?: unknown };
+      if (typeof saved.enabled === 'boolean') setWaterReminderEnabled(saved.enabled);
+      if (typeof saved.time === 'string' && reminderTimes.includes(saved.time)) setWaterReminderTime(saved.time);
+    }).catch(() => undefined).finally(() => { if (mounted) setRemindersLoaded(true); });
+    return () => { mounted = false; };
+  }, []);
+
+  useEffect(() => {
+    if (!remindersLoaded) return;
+    AsyncStorage.setItem(reminderStorageKey, JSON.stringify({ enabled: waterReminderEnabled, time: waterReminderTime })).catch(() => undefined);
+    let mounted = true;
+    const syncSchedule = async () => {
+      if (Platform.OS === 'web') return;
+      const scheduled = await Notifications.getAllScheduledNotificationsAsync();
+      const existing = scheduled.filter((notification) => notification.content.data?.tag === reminderNotificationTag);
+      await Promise.all(existing.map((notification) => Notifications.cancelScheduledNotificationAsync(notification.identifier)));
+      if (!mounted || !waterReminderEnabled || (await Notifications.getPermissionsAsync()).status !== 'granted') return;
+      const [hour, minute] = waterReminderTime.split(':').map(Number);
+      if (Platform.OS === 'android') {
+        await Notifications.setNotificationChannelAsync('daily-reminders', {
+          name: translate('Lembretes diários', locale),
+          importance: Notifications.AndroidImportance.DEFAULT,
+        });
+      }
+      await Notifications.scheduleNotificationAsync({
+        content: {
+          title: translate('Pausa para água', locale),
+          body: translate('Um momento para beber alguns goles e seguir no seu ritmo.', locale),
+          data: { tag: reminderNotificationTag },
+        },
+        trigger: { type: Notifications.SchedulableTriggerInputTypes.DAILY, hour, minute, ...(Platform.OS === 'android' ? { channelId: 'daily-reminders' } : {}) },
+      });
+    };
+    syncSchedule().catch(() => undefined);
+    return () => { mounted = false; };
+  }, [locale, remindersLoaded, waterReminderEnabled, waterReminderTime]);
+
+  useEffect(() => {
     if (!supabase) return;
     let mounted = true;
     supabase.auth.getSession().then(({ data }) => { if (mounted) setSession(data.session); });
@@ -600,7 +686,7 @@ export default function Home() {
     Animated.spring(reveal, { toValue: 1, useNativeDriver: true, friction: 7, tension: 55 }).start();
   };
 
-  if (!localeLoaded || !profileLoaded || !progressLoaded || !historyLoaded) return <LocaleContext.Provider value={locale}><SafeAreaView style={s.safe} edges={['top']}><StatusBar barStyle="dark-content" /><View style={s.profileLoading}><Text style={s.profileLoadingText}>PREPARANDO SEU ESPAÇO</Text></View></SafeAreaView></LocaleContext.Provider>;
+  if (!localeLoaded || !remindersLoaded || !profileLoaded || !progressLoaded || !historyLoaded) return <LocaleContext.Provider value={locale}><SafeAreaView style={s.safe} edges={['top']}><StatusBar barStyle="dark-content" /><View style={s.profileLoading}><Text style={s.profileLoadingText}>PREPARANDO SEU ESPAÇO</Text></View></SafeAreaView></LocaleContext.Provider>;
 
   if (!profile || editingProfile) return <LocaleContext.Provider value={locale}><SafeAreaView style={s.setupSafe} edges={['top']}>
     <StatusBar barStyle="light-content" />
@@ -787,7 +873,9 @@ export default function Home() {
       </View>
       <View style={s.todaySection}><Text style={s.sectionTitle}>PREFERÊNCIAS</Text></View>
       <View style={l.localeSection}><Text style={l.localeHeading}>IDIOMA</Text><View style={l.localeOptions}>{localeOptions.map((option) => <TouchableOpacity key={option.id} accessibilityRole="radio" accessibilityLabel={`${translate('IDIOMA', locale)}: ${option.nativeName}`} accessibilityState={{ selected: locale === option.id }} onPress={() => changeLocale(option.id)} style={[l.localeOption, locale === option.id && l.localeOptionActive]}><Text style={[l.localeName, locale === option.id && l.localeNameActive]}>{option.nativeName}</Text><Text style={[l.localeCode, locale === option.id && l.localeNameActive]}>{option.label}</Text></TouchableOpacity>)}</View></View>
-      {[['LEMBRETES', 'Ativados'], ['PRIVACIDADE', 'Seus dados são seus'], ['AJUDA', 'Suporte e respostas']].map(([label, value], i) => <TouchableOpacity key={label} style={[s.preferenceRow, i < 2 && s.rowRule]} onPress={() => showNotice(translate('Configuração em breve.', locale))}><Text style={s.preferenceLabel}>{label}</Text><Text style={s.preferenceValue}>{value}</Text><Text style={s.preferenceArrow}>↗</Text></TouchableOpacity>)}
+      <TouchableOpacity accessibilityRole="button" accessibilityState={{ expanded: waterReminderExpanded }} onPress={() => setWaterReminderExpanded((value) => !value)} style={[s.preferenceRow, s.rowRule]}><Text style={s.preferenceLabel}>LEMBRETES</Text><Text style={s.preferenceValue}>{waterReminderEnabled ? `${translate('Ativado', locale)} · ${waterReminderTime}` : translate('Desativado', locale)}</Text><Text style={s.preferenceArrow}>{waterReminderExpanded ? '↗' : '↘'}</Text></TouchableOpacity>
+      {waterReminderExpanded ? <View style={l.reminderPanel}><Text style={l.reminderTitle}>PAUSA PARA ÁGUA</Text><Text style={l.reminderCopy}>Escolha um horário para receber um lembrete diário, sem metas rígidas.</Text><View style={l.reminderTimes}>{reminderTimes.map((time) => <TouchableOpacity key={time} accessibilityRole="radio" accessibilityState={{ selected: waterReminderTime === time }} onPress={() => updateWaterReminderTime(time)} style={[l.reminderTime, waterReminderTime === time && l.reminderTimeActive]}><Text style={[l.reminderTimeText, waterReminderTime === time && l.reminderTimeTextActive]}>{time}</Text></TouchableOpacity>)}</View><TouchableOpacity onPress={toggleWaterReminder} style={[l.reminderAction, waterReminderEnabled && l.reminderActionOff]}><Text style={l.reminderActionText}>{waterReminderEnabled ? 'DESATIVAR LEMBRETE' : 'ATIVAR LEMBRETE DIÁRIO'}</Text><Text style={l.reminderActionArrow}>{waterReminderEnabled ? '×' : '↗'}</Text></TouchableOpacity></View> : null}
+      {[[ 'PRIVACIDADE', 'Seus dados são seus'], ['AJUDA', 'Suporte e respostas']].map(([label, value], i) => <TouchableOpacity key={label} style={[s.preferenceRow, i === 0 && s.rowRule]} onPress={() => showNotice(translate('Configuração em breve.', locale))}><Text style={s.preferenceLabel}>{label}</Text><Text style={s.preferenceValue}>{value}</Text><Text style={s.preferenceArrow}>↗</Text></TouchableOpacity>)}
       <View style={s.profilePlan}><Text style={s.profilePlanLabel}>PLANO ATUAL</Text><Text style={s.profilePlanTitle}>Evolução gratuita</Text><Text style={s.profilePlanSub}>Seu primeiro passo começa aqui.</Text></View>
     </ScrollView>}
 
@@ -816,6 +904,7 @@ const s = StyleSheet.create({
 const l = StyleSheet.create({
   localeSection:{marginBottom:8},localeHeading:{fontSize:8,fontWeight:'900',letterSpacing:1.1,color:green,marginBottom:9},localeOptions:{flexDirection:'row',gap:8},
   localeOption:{flex:1,minHeight:53,paddingHorizontal:9,paddingVertical:8,backgroundColor:'#E7E8DE',justifyContent:'space-between',borderTopLeftRadius:17,borderTopRightRadius:4,borderBottomLeftRadius:4,borderBottomRightRadius:17,borderWidth:1,borderColor:'#D8D8CA'},localeOptionActive:{backgroundColor:ink,borderColor:ink},localeName:{fontFamily:'sans-serif-condensed',fontSize:12,fontWeight:'900',color:ink},localeCode:{alignSelf:'flex-end',fontSize:6,fontWeight:'900',letterSpacing:1,color:green},localeNameActive:{color:paper},
+  reminderPanel:{padding:14,marginBottom:6,backgroundColor:'#E7E8DE',borderTopLeftRadius:4,borderTopRightRadius:22,borderBottomLeftRadius:22,borderBottomRightRadius:4},reminderTitle:{fontFamily:'sans-serif-condensed',fontSize:15,fontWeight:'900',letterSpacing:.5,color:ink},reminderCopy:{fontSize:9,lineHeight:14,color:quiet,marginTop:5},reminderTimes:{flexDirection:'row',gap:7,marginTop:13},reminderTime:{flex:1,minHeight:34,alignItems:'center',justifyContent:'center',backgroundColor:paper,borderRadius:14,borderWidth:1,borderColor:line},reminderTimeActive:{backgroundColor:ink,borderColor:ink},reminderTimeText:{fontSize:9,fontWeight:'800',color:ink},reminderTimeTextActive:{color:paper},reminderAction:{minHeight:38,marginTop:12,paddingHorizontal:12,flexDirection:'row',alignItems:'center',justifyContent:'space-between',backgroundColor:orange,borderTopLeftRadius:4,borderTopRightRadius:15,borderBottomLeftRadius:15,borderBottomRightRadius:4},reminderActionOff:{backgroundColor:ink},reminderActionText:{fontSize:7,fontWeight:'900',letterSpacing:.8,color:paper},reminderActionArrow:{fontSize:16,fontWeight:'900',color:paper},
 });
 
 const a = StyleSheet.create({

@@ -66,4 +66,5 @@ Os limites, preços e custos por análise ainda precisam ser medidos. Pagamentos
 4. Concluído em parte: tabelas `profiles`, `daily_progress` e `appearance_analyses`, políticas RLS e bucket privado de fotos temporárias estão aplicados no Supabase conectado.
 5. Implementado no app e no servidor: análise visual com consentimento, limite de uso, função Supabase, armazenamento privado e remoção da foto temporária. Falta configurar `OPENAI_API_KEY` como segredo e publicar a função `analyze-appearance`.
 6. Concluído em parte: perfil, hábitos, missão e histórico recente ficam salvos localmente e sincronizados quando há conta. A aba Evolução exibe registros dos últimos 30 dias corridos no plano gratuito; a conta busca até 90 dias para sincronizar entre aparelhos. O Perfil permite apagar os dados sincronizados; a função de exclusão está publicada e pausa a sincronização neste aparelho.
-7. Medir custo real antes de definir limites Premium e pagamentos.
+7. Implementado: lembrete local diário de hidratação com quatro horários, escolha opcional e controle para ativar/desativar. A permissão de notificações só é solicitada quando a pessoa ativa o lembrete.
+8. Medir custo real antes de definir limites Premium e pagamentos.

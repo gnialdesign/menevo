@@ -45,6 +45,7 @@ No Perfil, **Apagar dados da nuvem** remove perfil sincronizado, progresso, resu
 - A revelação da missão tem entrada animada; a evolução mostra uma árvore de fases tocável.
 - Conta por e-mail e senha e sincronização de perfil/progresso recente estão implementadas; exigem as variáveis do Supabase e a migração SQL acima.
 - O Perfil permite escolher português brasileiro, inglês ou espanhol. A escolha fica salva neste aparelho; datas, semana, interface, missões e novas leituras visuais acompanham o idioma selecionado.
+- Em **Perfil → Preferências → Lembretes**, a pessoa pode ativar um aviso diário para beber água, escolher entre quatro horários e desligá-lo quando quiser. É uma notificação local, salva no aparelho e solicitada somente após tocar em ativar.
 - A aba Evolução exibe até 30 dias do histórico local e sincronizado.
 - Pagamentos e chamadas de IA para outras funções ainda não estão conectados.
 - Os números exibidos são demonstrativos.

@@ -58,9 +58,15 @@ Deno.serve(async (request) => {
   const user = userResult.user;
   if (authError || !user) return json({ error: 'Sessão inválida. Entre novamente.' }, 401);
 
-  let body: { analysis_id?: unknown };
+  let body: { analysis_id?: unknown; locale?: unknown };
   try { body = await request.json(); } catch { return json({ error: 'Solicitação inválida.' }, 400); }
   const analysisId = typeof body.analysis_id === 'string' ? body.analysis_id : '';
+  const locale = body.locale === 'en' || body.locale === 'es' ? body.locale : 'pt-BR';
+  const languageInstruction = locale === 'en'
+    ? 'Respond in English. Give a respectful personal presentation review based only on what is visible: outfit coordination, hair/beard when visible, framing, pose, and lighting. Never identify the person or infer identity, age, ethnicity, personality, health, or medical conditions. Do not rate attractiveness, criticize the body, or diagnose skin conditions. If something is not visible, say so naturally and adapt the suggestion. Give 2 or 3 concrete observations and exactly 3 simple, optional, low-cost experiments; do not pressure the user to buy anything. Give each suggestion a short title and a practical detail. Sound human, positive without exaggeration, and useful.'
+    : locale === 'es'
+      ? 'Responde en español. Haz una lectura respetuosa de la presentación personal basada solo en lo visible: combinación de ropa, cabello/barba cuando se vean, encuadre, postura e iluminación. Nunca identifiques a la persona ni infieras identidad, edad, etnia, personalidad, salud o condiciones médicas. No puntúes el atractivo, no critiques el cuerpo ni diagnostiques afecciones de la piel. Si algo no se ve, dilo con naturalidad y adapta la sugerencia. Da 2 o 3 observaciones concretas y exactamente 3 ideas sencillas, opcionales y de bajo coste; no presiones para comprar. Cada sugerencia debe tener un título breve y un detalle práctico. El tono debe ser cercano, positivo sin exagerar y útil.'
+      : 'Responda em português brasileiro. Faça uma leitura respeitosa de apresentação pessoal baseada somente no que está visível: combinação de roupa, cabelo/barba quando visíveis, enquadramento, pose e iluminação. Nunca identifique a pessoa, infira identidade, idade, etnia, personalidade, saúde ou condição médica. Não dê nota de beleza, não critique o corpo e não faça diagnóstico dermatológico. Se algo não estiver visível, diga isso com naturalidade e adapte a sugestão. Dê 2 ou 3 observações concretas e exatamente 3 experiências simples, opcionais e de baixo custo; não pressione compras. Cada sugestão deve ter um título curto e um detalhe prático. A resposta deve soar humana, positiva sem exagero e útil.';
   if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(analysisId)) return json({ error: 'Identificador inválido.' }, 400);
 
   const admin = createClient(supabaseUrl, serviceRoleKey, { auth: { persistSession: false, autoRefreshToken: false } });
@@ -95,7 +101,7 @@ Deno.serve(async (request) => {
         input: [{
           role: 'user',
           content: [
-            { type: 'input_text', text: 'Responda em português brasileiro. Faça uma leitura respeitosa de apresentação pessoal baseada somente no que está visível: combinação de roupa, cabelo/barba quando visíveis, enquadramento, pose e iluminação. Nunca identifique a pessoa, infira identidade, idade, etnia, personalidade, saúde ou condição médica. Não dê nota de beleza, não critique o corpo e não faça diagnóstico dermatológico. Se algo não estiver visível, diga isso com naturalidade e adapte a sugestão. Dê 2 ou 3 observações concretas e exatamente 3 experiências simples, opcionais e de baixo custo; não pressione compras. Cada sugestão deve ter um título curto e um detalhe prático. A resposta deve soar humana, positiva sem exagero e útil.' },
+            { type: 'input_text', text: languageInstruction },
             { type: 'input_image', image_url: imageUrl, detail: 'high' },
           ],
         }],

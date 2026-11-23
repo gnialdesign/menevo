@@ -9,7 +9,7 @@ Aplicativo para apoiar homens na apresentação pessoal, cuidados, hábitos e ac
 - Plataformas: Android e iOS, com uma versão web útil para prévia.
 - Acesso: freemium, com limites ajustáveis e sem preço definido antes de medir custos.
 - IA: OpenAI, chamada somente pelo servidor.
-- Idiomas planejados: português brasileiro, inglês e espanhol.
+- Idiomas disponíveis: português brasileiro, inglês e espanhol, com preferência salva localmente no aparelho.
 - Primeira entrega: MVP para uso pessoal e futura oferta comercial.
 
 ## MVP de produto
@@ -62,7 +62,7 @@ Os limites, preços e custos por análise ainda precisam ser medidos. Pagamentos
 
 1. Validar identidade visual, animações e fluxo com o usuário.
 2. Concluído em parte: onboarding, edição de perfil, autenticação por e-mail/senha e sincronização do perfil e do histórico recente com Supabase, protegidos por RLS.
-3. Adicionar tradução real para português, inglês e espanhol.
+3. Concluído: interface, missões, datas e novas análises visuais em português, inglês e espanhol; a preferência de idioma fica salva no aparelho.
 4. Concluído em parte: tabelas `profiles`, `daily_progress` e `appearance_analyses`, políticas RLS e bucket privado de fotos temporárias estão aplicados no Supabase conectado.
 5. Implementado no app e no servidor: análise visual com consentimento, limite de uso, função Supabase, armazenamento privado e remoção da foto temporária. Falta configurar `OPENAI_API_KEY` como segredo e publicar a função `analyze-appearance`.
 6. Concluído em parte: perfil, hábitos, missão e histórico recente ficam salvos localmente e sincronizados quando há conta. A aba Evolução exibe registros dos últimos 30 dias corridos no plano gratuito; a conta busca até 90 dias para sincronizar entre aparelhos. O Perfil permite apagar os dados sincronizados; a função de exclusão está publicada e pausa a sincronização neste aparelho.

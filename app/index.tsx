@@ -1,10 +1,11 @@
-import { useEffect, useRef, useState } from 'react';
+import { Children, cloneElement, createContext, isValidElement, useContext, useEffect, useRef, useState, type ReactNode } from 'react';
 import AsyncStorage from '@react-native-async-storage/async-storage';
-import { Animated, Easing, Image, ImageBackground, ScrollView, StatusBar, StyleSheet, Text, TextInput, TouchableOpacity, View } from 'react-native';
+import { Animated, Easing, Image, ImageBackground, ScrollView, StatusBar, StyleSheet, Text as NativeText, TextInput, TouchableOpacity, View, type TextProps } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import type { Session } from '@supabase/supabase-js';
 import * as ImagePicker from 'expo-image-picker';
 import { hasSupabaseConfig, supabase } from '../lib/supabase';
+import { intlLocales, localeOptions, translate, type Locale } from '../lib/locales';
 
 type Tab = 'Início' | 'Rotina' | 'Análise' | 'Evolução' | 'Perfil';
 type UserProfile = { name: string; goal: string };
@@ -12,6 +13,7 @@ type ProgressRecord = { local_date: string; done: number[]; missionDone: boolean
 type AppearanceAdvice = { headline: string; observations: string[]; suggestions: { title: string; detail: string }[]; reminder: string };
 type AppearanceRecord = { id: string; status: string; result: AppearanceAdvice | null; created_at: string };
 const profileStorageKey = 'mens-evolution-profile-v1';
+const localeStorageKey = 'mens-evolution-locale-v1';
 const progressStoragePrefix = 'mens-evolution-progress-';
 const syncPauseStoragePrefix = 'mens-evolution-sync-paused-v1:';
 const profileGoals = ['Autocuidado', 'Movimento', 'Estilo', 'Rotina'];
@@ -23,9 +25,6 @@ const paper = '#F6F1E7';
 const quiet = '#78847C';
 const line = '#D8D8CA';
 const todayDate = new Date();
-const today = new Intl.DateTimeFormat('pt-BR', { weekday: 'long', day: 'numeric', month: 'long' }).format(todayDate);
-const todayShort = new Intl.DateTimeFormat('pt-BR', { day: '2-digit', month: 'short' }).format(todayDate).replace('.', '').toUpperCase();
-const todayIndex = (todayDate.getDay() + 6) % 7;
 const todayProgressKey = `mens-evolution-progress-${todayDate.getFullYear()}-${String(todayDate.getMonth() + 1).padStart(2, '0')}-${String(todayDate.getDate()).padStart(2, '0')}`;
 const todayLocalDate = todayProgressKey.replace(progressStoragePrefix, '');
 const freeHistoryStartDate = new Date(todayDate);
@@ -69,9 +68,9 @@ function hashSeed(key: string) {
   for (let i = 0; i < key.length; i += 1) hash = Math.imul(hash ^ key.charCodeAt(i), 16777619);
   return hash >>> 0;
 }
-function historyDateLabel(value: string) {
-  if (value === todayLocalDate) return 'HOJE';
-  return new Intl.DateTimeFormat('pt-BR', { weekday: 'short', day: '2-digit', month: 'short' }).format(new Date(`${value}T12:00:00`)).replace('.', '').toUpperCase();
+function historyDateLabel(value: string, locale: Locale) {
+  if (value === todayLocalDate) return translate('HOJE', locale);
+  return new Intl.DateTimeFormat(locale, { weekday: 'short', day: '2-digit', month: 'short' }).format(new Date(`${value}T12:00:00`)).replace('.', '').toLocaleUpperCase(locale);
 }
 function shuffledMonth(year: number, month: number) {
   const order = dailyEditions.map((_, index) => index);
@@ -106,6 +105,20 @@ const tasks = [
   { id: 4, title: 'Beber água', detail: 'AO LONGO DO DIA' },
 ];
 
+const LocaleContext = createContext<Locale>('pt-BR');
+
+function localizeNode(node: ReactNode, locale: Locale): ReactNode {
+  if (typeof node === 'string') return translate(node, locale);
+  if (Array.isArray(node)) return node.map((child) => localizeNode(child, locale));
+  if (isValidElement<{ children?: ReactNode }>(node)) return cloneElement(node, { children: Children.map(node.props.children, (child) => localizeNode(child, locale)) });
+  return node;
+}
+
+function Text({ children, ...props }: TextProps) {
+  const locale = useContext(LocaleContext);
+  return <NativeText {...props}>{Children.map(children, (child) => localizeNode(child, locale))}</NativeText>;
+}
+
 function PageHeading({ eyebrow, title, subtitle }: { eyebrow: string; title: string; subtitle: string }) {
   return <View style={s.pageHeading}><Text style={s.eyebrow}>{eyebrow}</Text><Text style={s.pageTitle}>{title}</Text><Text style={s.pageSubtitle}>{subtitle}</Text></View>;
 }
@@ -124,6 +137,8 @@ function TaskRows({ ids, done, toggle }: { ids: number[]; done: number[]; toggle
 
 export default function Home() {
   const [tab, setTab] = useState<Tab>('Início');
+  const [locale, setLocale] = useState<Locale>('pt-BR');
+  const [localeLoaded, setLocaleLoaded] = useState(false);
   const [profile, setProfile] = useState<UserProfile | null>(null);
   const [profileLoaded, setProfileLoaded] = useState(false);
   const [progressLoaded, setProgressLoaded] = useState(false);
@@ -158,6 +173,16 @@ export default function Home() {
   const [authMessage, setAuthMessage] = useState('');
   const [authError, setAuthError] = useState(false);
   const syncedUser = useRef<string | null>(null);
+  const intlLocale = intlLocales[locale];
+  const today = new Intl.DateTimeFormat(intlLocale, { weekday: 'long', day: 'numeric', month: 'long' }).format(todayDate);
+  const todayShort = new Intl.DateTimeFormat(intlLocale, { day: '2-digit', month: 'short' }).format(todayDate).replace('.', '').toLocaleUpperCase(intlLocale);
+  const weekStartsSunday = locale === 'en';
+  const todayIndex = weekStartsSunday ? todayDate.getDay() : (todayDate.getDay() + 6) % 7;
+  const weekDays = Array.from({ length: 7 }, (_, index) => {
+    const date = new Date(todayDate);
+    date.setDate(date.getDate() + index - todayIndex);
+    return new Intl.DateTimeFormat(intlLocale, { weekday: 'narrow' }).format(date).toLocaleUpperCase(intlLocale);
+  });
   const entrance = useRef(new Animated.Value(0)).current;
   const reveal = useRef(new Animated.Value(0)).current;
   const orbit = useRef(new Animated.Value(0)).current;
@@ -180,6 +205,12 @@ export default function Home() {
   const recordedSteps = recentHistory.reduce((total, record) => total + record.done.length, 0);
   const toggle = (id: number) => { setProgressUpdatedAt(new Date().toISOString()); setDone((current) => current.includes(id) ? current.filter((n) => n !== id) : [...current, id]); };
   const showNotice = (message: string) => { setNotice(message); setTimeout(() => setNotice(''), 2400); };
+
+  const changeLocale = async (nextLocale: Locale) => {
+    setLocale(nextLocale);
+    try { await AsyncStorage.setItem(localeStorageKey, nextLocale); }
+    catch { showNotice(translate('Não foi possível salvar a preferência. Tente novamente.', nextLocale)); }
+  };
 
   const syncAccountData = async (userId: string) => {
     if (!supabase || !profile) return false;
@@ -353,7 +384,7 @@ export default function Home() {
       if (imageBlob.size > 8 * 1024 * 1024) throw new Error('A foto passou do limite de 8 MB. Escolha uma imagem menor.');
       const { error: uploadError } = await supabase.storage.from('analysis-photos').upload(photoPath, imageBlob, { contentType: 'image/jpeg', upsert: false });
       if (uploadError) throw uploadError;
-      const { data, error: invokeError } = await supabase.functions.invoke('analyze-appearance', { body: { analysis_id: recordId } });
+      const { data, error: invokeError } = await supabase.functions.invoke('analyze-appearance', { body: { analysis_id: recordId, locale } });
       if (invokeError) {
         let serverMessage = '';
         try { serverMessage = (await invokeError.context?.clone().json())?.error ?? ''; } catch { /* use the generic function error below */ }
@@ -381,6 +412,14 @@ export default function Home() {
     setAnalysisRecords((records) => records.filter((record) => record.id !== id));
     showNotice('Resultado apagado.');
   };
+
+  useEffect(() => {
+    let mounted = true;
+    AsyncStorage.getItem(localeStorageKey).then((value) => {
+      if (mounted && (value === 'pt-BR' || value === 'en' || value === 'es')) setLocale(value);
+    }).catch(() => undefined).finally(() => { if (mounted) setLocaleLoaded(true); });
+    return () => { mounted = false; };
+  }, []);
 
   useEffect(() => {
     if (!supabase) return;
@@ -561,9 +600,9 @@ export default function Home() {
     Animated.spring(reveal, { toValue: 1, useNativeDriver: true, friction: 7, tension: 55 }).start();
   };
 
-  if (!profileLoaded || !progressLoaded || !historyLoaded) return <SafeAreaView style={s.safe} edges={['top']}><StatusBar barStyle="dark-content" /><View style={s.profileLoading}><Text style={s.profileLoadingText}>PREPARANDO SEU ESPAÇO</Text></View></SafeAreaView>;
+  if (!localeLoaded || !profileLoaded || !progressLoaded || !historyLoaded) return <LocaleContext.Provider value={locale}><SafeAreaView style={s.safe} edges={['top']}><StatusBar barStyle="dark-content" /><View style={s.profileLoading}><Text style={s.profileLoadingText}>PREPARANDO SEU ESPAÇO</Text></View></SafeAreaView></LocaleContext.Provider>;
 
-  if (!profile || editingProfile) return <SafeAreaView style={s.setupSafe} edges={['top']}>
+  if (!profile || editingProfile) return <LocaleContext.Provider value={locale}><SafeAreaView style={s.setupSafe} edges={['top']}>
     <StatusBar barStyle="light-content" />
     <ImageBackground source={require('../assets/onboarding-texture.jpg')} resizeMode="cover" style={s.setupBackdrop}>
     <View pointerEvents="none" style={s.setupTint} />
@@ -576,7 +615,7 @@ export default function Home() {
       </View>
       <View style={s.setupForm}>
         <Text style={s.setupLabel}>COMO PODEMOS TE CHAMAR?</Text>
-        <TextInput value={profileName} onChangeText={(value) => { setProfileName(value); setProfileError(''); }} placeholder="Seu nome" placeholderTextColor="#A9B5A9" style={s.setupInput} maxLength={40} autoCapitalize="words" autoCorrect={false} returnKeyType="done" />
+        <TextInput value={profileName} onChangeText={(value) => { setProfileName(value); setProfileError(''); }} placeholder={translate('Seu nome', locale)} placeholderTextColor="#A9B5A9" style={s.setupInput} maxLength={40} autoCapitalize="words" autoCorrect={false} returnKeyType="done" />
         <Text style={s.setupLabel}>SEU FOCO PRINCIPAL</Text>
         <Animated.View style={[s.primaryGoal, { opacity: focusMotion, transform: [{ translateY: focusMotion.interpolate({ inputRange: [0, 1], outputRange: [-14, 0] }) }, { rotate: focusMotion.interpolate({ inputRange: [0, 1], outputRange: ['-3deg', '0deg'] }) }, { scale: focusMotion.interpolate({ inputRange: [0, 1], outputRange: [0.97, 1] }) }] }]}>
           <View style={s.primaryGoalMeta}><Text style={s.primaryGoalKicker}>PONTO DE PARTIDA</Text><Text style={s.primaryGoalNumber}>01 / 04</Text></View>
@@ -592,14 +631,14 @@ export default function Home() {
         {profile && <TouchableOpacity onPress={() => setEditingProfile(false)} style={s.setupCancel}><Text style={s.setupCancelText}>VOLTAR AO PERFIL</Text></TouchableOpacity>}
       </View>
     </ScrollView>
-    <TouchableOpacity accessibilityRole="button" accessibilityLabel="Revelar detalhe escondido do dia" onPress={revealEasterEgg} activeOpacity={0.85} style={s.easterHotspot}>
+    <TouchableOpacity accessibilityRole="button" accessibilityLabel={translate('Revelar detalhe escondido do dia', locale)} onPress={revealEasterEgg} activeOpacity={0.85} style={s.easterHotspot}>
       <Animated.View style={[s.easterMark, { opacity: easterPulse.interpolate({ inputRange: [0, 1], outputRange: [0.5, 1] }), transform: [{ scale: easterPulse.interpolate({ inputRange: [0, 1], outputRange: [0.88, 1.08] }) }] }]}><Text style={s.easterGlyph}>✳</Text></Animated.View>
     </TouchableOpacity>
     {easterEggRevealed ? <Animated.View pointerEvents="none" style={[s.easterNote, { opacity: easterReveal, transform: [{ translateY: easterReveal.interpolate({ inputRange: [0, 1], outputRange: [8, 0] }) }, { scale: easterReveal.interpolate({ inputRange: [0, 1], outputRange: [0.94, 1] }) }] }]}><Text style={s.easterNoteKicker}>ACHOU / {todayShort}</Text><Text style={s.easterNoteText}>{dailyEasterEgg}</Text></Animated.View> : null}
     </ImageBackground>
-  </SafeAreaView>;
+  </SafeAreaView></LocaleContext.Provider>;
 
-  if (accountMode) return <SafeAreaView style={s.setupSafe} edges={['top']}>
+  if (accountMode) return <LocaleContext.Provider value={locale}><SafeAreaView style={s.setupSafe} edges={['top']}>
     <StatusBar barStyle="light-content" />
     <ImageBackground source={require('../assets/onboarding-texture.jpg')} resizeMode="cover" style={s.setupBackdrop}>
       <View pointerEvents="none" style={s.setupTint} />
@@ -607,8 +646,8 @@ export default function Home() {
         <View style={s.setupTop}><View style={s.setupWordmark}><Text style={s.setupMark}>ME</Text><Text style={s.setupBrand}>MEN'S EVOLUTION</Text></View><Text style={s.setupIndex}>CONTA / 02</Text></View>
         <View style={s.authIntro}><Text style={s.setupEyebrow}>SEU CAMINHO, EM MAIS DE UM LUGAR</Text><Text style={s.authTitle}>{accountMode === 'signup' ? 'LEVA SUA\nEVOLUÇÃO.' : 'BEM DE\nVOLTA.'}</Text><Text style={s.setupSubtitle}>Seu perfil e o progresso diário podem acompanhar você.</Text></View>
         {!hasSupabaseConfig ? <View style={s.authInfo}><Text style={s.authInfoMark}>↗</Text><Text style={s.authInfoTitle}>A CONTA ESTÁ PRONTA PARA CONECTAR</Text><Text style={s.authInfoText}>Falta ligar o projeto de nuvem do app. Até lá, seu perfil e seu progresso continuam salvos neste aparelho.</Text></View> : <View style={s.authForm}>
-          <Text style={s.setupLabel}>E-MAIL</Text><TextInput value={authEmail} onChangeText={setAuthEmail} placeholder="voce@email.com" placeholderTextColor="#A9B5A9" style={s.setupInput} autoCapitalize="none" autoCorrect={false} keyboardType="email-address" textContentType="emailAddress" />
-          <Text style={s.setupLabel}>SENHA</Text><TextInput value={authPassword} onChangeText={setAuthPassword} placeholder="Mínimo de 6 caracteres" placeholderTextColor="#A9B5A9" style={s.setupInput} secureTextEntry textContentType={accountMode === 'signup' ? 'newPassword' : 'password'} />
+          <Text style={s.setupLabel}>E-MAIL</Text><TextInput value={authEmail} onChangeText={setAuthEmail} placeholder={translate('voce@email.com', locale)} placeholderTextColor="#A9B5A9" style={s.setupInput} autoCapitalize="none" autoCorrect={false} keyboardType="email-address" textContentType="emailAddress" />
+          <Text style={s.setupLabel}>SENHA</Text><TextInput value={authPassword} onChangeText={setAuthPassword} placeholder={translate('Mínimo de 6 caracteres', locale)} placeholderTextColor="#A9B5A9" style={s.setupInput} secureTextEntry textContentType={accountMode === 'signup' ? 'newPassword' : 'password'} />
           {authMessage ? <Text accessibilityRole={authError ? 'alert' : undefined} style={[s.authMessage, authError && s.authMessageError]}>{authMessage}</Text> : null}
           <TouchableOpacity disabled={authBusy} style={[s.setupButton, authBusy && s.authButtonBusy]} onPress={submitAuth} activeOpacity={0.85}><Text style={s.setupButtonText}>{authBusy ? 'CONECTANDO…' : accountMode === 'signup' ? 'CRIAR MINHA CONTA' : 'ENTRAR E SINCRONIZAR'}</Text><Text style={s.setupButtonArrow}>↗</Text></TouchableOpacity>
         </View>}
@@ -617,9 +656,9 @@ export default function Home() {
       </ScrollView>
       <TouchableOpacity onPress={() => setAccountMode(null)} style={s.authBack}><Text style={s.authBackText}>← VOLTAR AO PERFIL</Text></TouchableOpacity>
     </ImageBackground>
-  </SafeAreaView>;
+  </SafeAreaView></LocaleContext.Provider>;
 
-  return <SafeAreaView style={s.safe} edges={['top']}>
+  return <LocaleContext.Provider value={locale}><SafeAreaView style={s.safe} edges={['top']}>
     <StatusBar barStyle="dark-content" />
     <View style={s.topBar}>
       <TouchableOpacity onPress={() => setTab('Início')} style={s.wordmark}><Text style={s.wordmarkME}>ME</Text><Text style={s.wordmarkName}>MEN'S EVOLUTION</Text></TouchableOpacity>
@@ -654,7 +693,7 @@ export default function Home() {
 
     {tab === 'Rotina' && <ScrollView contentContainerStyle={s.content} showsVerticalScrollIndicator={false}>
       <PageHeading eyebrow="UM MAPA FLEXÍVEL" title="SEU RITMO." subtitle="Hábitos em blocos simples. Mude a ordem quando precisar." />
-      <View style={s.weekRibbon}><Text style={s.weekTitle}>SEMANA {String(todayDate.getDate()).padStart(2, '0')}</Text><View style={s.weekDots}>{['S','T','Q','Q','S','S','D'].map((day, i) => <View key={i} style={s.weekDay}><Text style={[s.weekLetter, i === todayIndex && s.weekLetterToday]}>{day}</Text><View style={[s.weekDot, i === todayIndex && s.weekDotToday]}>{i === todayIndex ? <View style={s.weekDotCore} /> : null}</View></View>)}</View></View>
+       <View style={s.weekRibbon}><Text style={s.weekTitle}>SEMANA {String(todayDate.getDate()).padStart(2, '0')}</Text><View style={s.weekDots}>{weekDays.map((day, i) => <View key={i} style={s.weekDay}><Text style={[s.weekLetter, i === todayIndex && s.weekLetterToday]}>{day}</Text><View style={[s.weekDot, i === todayIndex && s.weekDotToday]}>{i === todayIndex ? <View style={s.weekDotCore} /> : null}</View></View>)}</View></View>
       <View style={s.routineHeading}><Text style={s.sectionTitle}>ANTES DE SAIR</Text><Text style={s.routineNumber}>01 — 02</Text></View><TaskRows ids={[1, 2]} done={done} toggle={toggle} />
       <View style={s.routineHeading}><Text style={s.sectionTitle}>QUANDO DER</Text><Text style={s.routineNumber}>03 — 04</Text></View><TaskRows ids={[3, 4]} done={done} toggle={toggle} />
       <View style={s.noteCard}><Text style={s.noteCardLabel}>ATALHO DE HOJE</Text><Text style={s.noteCardText}>Deixe o que você quer usar à vista. Menos etapas para começar.</Text></View>
@@ -687,7 +726,7 @@ export default function Home() {
         {visibleHistory.map((record, index) => {
           const dayProgress = Math.round(record.done.length / tasks.length * 100);
           return <View key={record.local_date} style={[e.historyRow, index < visibleHistory.length - 1 && e.historyRowRule]}>
-            <View style={e.historyDateBlock}><View style={[e.historyDot, (record.done.length > 0 || record.missionDone) && e.historyDotOn]} /><Text style={e.historyDate}>{historyDateLabel(record.local_date)}</Text></View>
+            <View style={e.historyDateBlock}><View style={[e.historyDot, (record.done.length > 0 || record.missionDone) && e.historyDotOn]} /><Text style={e.historyDate}>{historyDateLabel(record.local_date, intlLocale)}</Text></View>
             <View style={e.historyRecordCopy}><View style={e.historyRecordTop}><Text style={e.historyRecordSteps}>{record.done.length}/{tasks.length} PASSOS</Text><Text style={[e.historyMission, record.missionDone && e.historyMissionOn]}>{record.missionDone ? 'MISSÃO FEITA' : 'MISSÃO ABERTA'}</Text></View><View style={e.historyRail}><View style={[e.historyRailFill, { width: `${dayProgress}%` }]} /></View></View>
             <Text style={e.historyPercent}>{dayProgress}%</Text>
           </View>;
@@ -719,7 +758,7 @@ export default function Home() {
 
       <View style={a.historyHeading}><View><Text style={a.sectionKicker}>SEU HISTÓRICO</Text><Text style={a.historyTitle}>IDEIAS PARA LEVAR.</Text></View><Text style={a.historyCount}>{analysisRecords.length}/10</Text></View>
       {analysisHistoryBusy ? <Text style={a.emptyHistory}>CARREGANDO SUAS LEITURAS…</Text> : analysisRecords.length === 0 ? <View style={a.emptyHistory}><Text style={a.emptyHistoryTitle}>AINDA SEM LEITURAS.</Text><Text style={a.emptyHistoryText}>Seus resultados concluídos aparecem aqui. A foto original não é guardada no histórico.</Text></View> : analysisRecords.map((record, index) => <View key={record.id} style={a.resultCard}>
-        <View style={a.resultTop}><Text style={a.resultNumber}>LEITURA / {String(analysisRecords.length - index).padStart(2, '0')}</Text><Text style={a.resultDate}>{new Intl.DateTimeFormat('pt-BR', { day: '2-digit', month: 'short' }).format(new Date(record.created_at)).replace('.', '').toUpperCase()}</Text></View>
+        <View style={a.resultTop}><Text style={a.resultNumber}>LEITURA / {String(analysisRecords.length - index).padStart(2, '0')}</Text><Text style={a.resultDate}>{new Intl.DateTimeFormat(intlLocale, { day: '2-digit', month: 'short' }).format(new Date(record.created_at)).replace('.', '').toLocaleUpperCase(intlLocale)}</Text></View>
         <Text style={a.resultHeadline}>{record.result?.headline ?? 'UMA IDEIA PARA SEU PRÓXIMO PASSO.'}</Text>
         {record.result?.observations?.map((item, i) => <View key={`o-${i}`} style={a.resultLine}><Text style={a.resultDot}>·</Text><Text style={a.resultBody}>{item}</Text></View>)}
         {record.result?.suggestions?.map((item, i) => <View key={`s-${i}`} style={a.suggestionRow}><Text style={a.suggestionIndex}>{String(i + 1).padStart(2, '0')}</Text><View style={a.suggestionCopy}><Text style={a.suggestionTitle}>{item.title}</Text><Text style={a.suggestionDetail}>{item.detail}</Text></View></View>)}
@@ -747,13 +786,14 @@ export default function Home() {
         </> : <TouchableOpacity onPress={() => { setAuthEmail(''); setAuthPassword(''); setAuthMessage(''); setAuthError(false); setAccountMode('signin'); }} style={d.dataAction}><Text style={d.dataActionText}>ENTRAR PARA CONTINUAR</Text><Text style={d.dataActionArrow}>↗</Text></TouchableOpacity>}
       </View>
       <View style={s.todaySection}><Text style={s.sectionTitle}>PREFERÊNCIAS</Text></View>
-      {[['IDIOMA', 'Português (Brasil)'], ['LEMBRETES', 'Ativados'], ['PRIVACIDADE', 'Seus dados são seus'], ['AJUDA', 'Suporte e respostas']].map(([label, value], i) => <TouchableOpacity key={label} style={[s.preferenceRow, i < 3 && s.rowRule]} onPress={() => showNotice(`${label}: configuração em breve.`)}><Text style={s.preferenceLabel}>{label}</Text><Text style={s.preferenceValue}>{value}</Text><Text style={s.preferenceArrow}>↗</Text></TouchableOpacity>)}
+      <View style={l.localeSection}><Text style={l.localeHeading}>IDIOMA</Text><View style={l.localeOptions}>{localeOptions.map((option) => <TouchableOpacity key={option.id} accessibilityRole="radio" accessibilityLabel={`${translate('IDIOMA', locale)}: ${option.nativeName}`} accessibilityState={{ selected: locale === option.id }} onPress={() => changeLocale(option.id)} style={[l.localeOption, locale === option.id && l.localeOptionActive]}><Text style={[l.localeName, locale === option.id && l.localeNameActive]}>{option.nativeName}</Text><Text style={[l.localeCode, locale === option.id && l.localeNameActive]}>{option.label}</Text></TouchableOpacity>)}</View></View>
+      {[['LEMBRETES', 'Ativados'], ['PRIVACIDADE', 'Seus dados são seus'], ['AJUDA', 'Suporte e respostas']].map(([label, value], i) => <TouchableOpacity key={label} style={[s.preferenceRow, i < 2 && s.rowRule]} onPress={() => showNotice(translate('Configuração em breve.', locale))}><Text style={s.preferenceLabel}>{label}</Text><Text style={s.preferenceValue}>{value}</Text><Text style={s.preferenceArrow}>↗</Text></TouchableOpacity>)}
       <View style={s.profilePlan}><Text style={s.profilePlanLabel}>PLANO ATUAL</Text><Text style={s.profilePlanTitle}>Evolução gratuita</Text><Text style={s.profilePlanSub}>Seu primeiro passo começa aqui.</Text></View>
     </ScrollView>}
 
     {notice ? <View style={s.toast}><Text style={s.toastDot}>•</Text><Text style={s.toastText}>{notice}</Text></View> : null}
     <View style={s.nav}>{([['Início','01'],['Rotina','02'],['Análise','03'],['Evolução','04'],['Perfil','05']] as const).map(([label, number]) => <TouchableOpacity accessibilityRole="tab" accessibilityState={{ selected: tab === label }} key={label} style={[s.navItem, s.navItemCompact]} onPress={() => setTab(label)}><View style={[s.navDash, tab === label && s.navDashActive]} /><Text style={[s.navNumber, tab === label && s.navNumberActive]}>{number}</Text><Text style={[s.navLabel, s.navLabelCompact, tab === label && s.navActive]}>{label}</Text></TouchableOpacity>)}</View>
-  </SafeAreaView>;
+  </SafeAreaView></LocaleContext.Provider>;
 }
 
 const s = StyleSheet.create({
@@ -771,6 +811,11 @@ const s = StyleSheet.create({
   rankBand:{backgroundColor:ink,padding:18,borderTopLeftRadius:31,borderBottomRightRadius:31,marginBottom:29},rankLabel:{fontSize:8,fontWeight:'900',letterSpacing:1.3,color:lime},rankNumber:{fontFamily:'sans-serif-condensed',fontSize:52,fontWeight:'900',color:paper,marginTop:5},rankUnit:{fontSize:18,color:lime},rankTrack:{height:5,backgroundColor:'#385F53',borderRadius:4,marginTop:6},rankFill:{height:5,backgroundColor:orange,borderRadius:4},rankFoot:{fontSize:9,color:'#C7D5C8',marginTop:9},treeHeading:{flexDirection:'row',alignItems:'baseline',justifyContent:'space-between',marginBottom:15},treeHint:{fontSize:7,fontWeight:'900',letterSpacing:.9,color:quiet},tree:{position:'relative',paddingVertical:2,marginBottom:24},treeSpine:{position:'absolute',top:22,bottom:23,left:21,width:2,backgroundColor:'#C5D3B2'},treeNodeRow:{minHeight:76,flexDirection:'row',alignItems:'center',gap:12},treeNodeOffset:{marginLeft:22},treeNode:{width:44,height:44,borderRadius:24,alignItems:'center',justifyContent:'center',zIndex:1},treeNodeOpen:{backgroundColor:orange,borderWidth:3,borderColor:'#F9B383'},treeNodeLocked:{backgroundColor:paper,borderWidth:1.5,borderColor:'#BFC8B5'},treeNodeNumber:{fontFamily:'sans-serif-condensed',fontSize:14,fontWeight:'900',color:quiet},treeNodeNumberOpen:{color:paper},treeNodeCopy:{flex:1},treeNodeTitle:{fontSize:10,fontWeight:'900',letterSpacing:1,color:ink},treeNodeDescription:{fontSize:9,color:quiet,marginTop:3,lineHeight:13},treeNodeStatus:{fontSize:6,fontWeight:'900',letterSpacing:.5,color:green},photoPrompt:{paddingTop:17,borderTopWidth:1,borderTopColor:line},photoPromptTitle:{fontFamily:'sans-serif-condensed',fontSize:19,fontWeight:'900',color:ink},photoPromptText:{fontSize:11,color:quiet,lineHeight:16,marginTop:5},photoPromptArrow:{fontSize:8,fontWeight:'900',letterSpacing:1,color:orange,marginTop:11},
   setupSafe:{flex:1,backgroundColor:ink},setupBackdrop:{flex:1},setupTint:{...StyleSheet.absoluteFillObject,backgroundColor:'rgba(18,62,57,0.18)'},easterHotspot:{position:'absolute',right:17,top:'42%',width:38,height:38,zIndex:5,alignItems:'center',justifyContent:'center'},easterMark:{width:26,height:26,borderRadius:13,borderWidth:1,borderColor:'rgba(243,90,43,0.75)',backgroundColor:'rgba(18,62,57,0.82)',alignItems:'center',justifyContent:'center'},easterGlyph:{fontSize:12,color:orange,fontWeight:'900'},easterNote:{position:'absolute',right:61,top:'41.3%',maxWidth:215,backgroundColor:'rgba(18,62,57,0.95)',paddingHorizontal:13,paddingVertical:9,borderTopLeftRadius:3,borderTopRightRadius:16,borderBottomLeftRadius:16,borderBottomRightRadius:3,borderWidth:1,borderColor:'rgba(221,242,138,0.3)',zIndex:4},easterNoteKicker:{fontSize:6,fontWeight:'900',letterSpacing:1.1,color:lime},easterNoteText:{fontFamily:'sans-serif-condensed',fontSize:14,fontWeight:'900',color:paper,marginTop:4},setupPage:{flexGrow:1,justifyContent:'space-between',paddingHorizontal:24,paddingTop:20,paddingBottom:26},setupTop:{flexDirection:'row',alignItems:'center',justifyContent:'space-between'},setupWordmark:{flexDirection:'row',alignItems:'center',gap:9},setupMark:{fontFamily:'sans-serif-condensed',fontSize:20,fontWeight:'900',letterSpacing:-1,color:orange},setupBrand:{fontSize:9,fontWeight:'900',letterSpacing:1.2,color:paper},setupIndex:{fontSize:7,fontWeight:'900',letterSpacing:1,color:lime},setupIntro:{marginTop:46,marginBottom:26},setupEyebrow:{fontSize:8,fontWeight:'900',letterSpacing:1.7,color:lime,marginBottom:11},setupTitle:{fontFamily:'sans-serif-condensed',fontSize:52,lineHeight:56,fontWeight:'900',letterSpacing:-1.4,color:paper},setupSubtitle:{fontSize:12,lineHeight:18,color:'#C3D2C5',marginTop:19,maxWidth:300},setupForm:{marginTop:3},setupLabel:{fontSize:8,fontWeight:'900',letterSpacing:1.25,color:lime,marginTop:19,marginBottom:8},setupInput:{height:48,borderBottomWidth:1,borderBottomColor:'#668176',color:paper,fontSize:19,fontWeight:'700',paddingHorizontal:2,paddingVertical:7},primaryGoal:{minHeight:76,backgroundColor:lime,borderTopLeftRadius:25,borderTopRightRadius:5,borderBottomLeftRadius:5,borderBottomRightRadius:25,paddingHorizontal:15,paddingVertical:12,justifyContent:'space-between'},primaryGoalMeta:{flexDirection:'row',justifyContent:'space-between',alignItems:'center'},primaryGoalKicker:{fontSize:7,fontWeight:'900',letterSpacing:1,color:green},primaryGoalNumber:{fontSize:7,fontWeight:'900',letterSpacing:.8,color:green},primaryGoalBottom:{flexDirection:'row',alignItems:'center',justifyContent:'space-between',marginTop:8},primaryGoalTitle:{fontFamily:'sans-serif-condensed',fontSize:21,fontWeight:'900',letterSpacing:.4,color:ink},primaryGoalArrow:{fontSize:20,fontWeight:'900',color:orange},secondaryGoalHeading:{flexDirection:'row',alignItems:'baseline',justifyContent:'space-between',marginTop:16,marginBottom:8},secondaryGoalTitle:{fontSize:8,fontWeight:'900',letterSpacing:1.1,color:lime},secondaryGoalHint:{fontSize:7,fontWeight:'900',letterSpacing:.8,color:'#B6C9B8'},secondaryGoals:{width:'100%',flexDirection:'row',justifyContent:'space-between'},secondaryGoalWrap:{width:'31.8%',flexGrow:0,flexShrink:0},secondaryGoal:{width:'100%',minHeight:66,backgroundColor:'rgba(26,80,71,0.94)',borderTopLeftRadius:16,borderTopRightRadius:4,borderBottomLeftRadius:4,borderBottomRightRadius:16,paddingHorizontal:8,paddingVertical:9,justifyContent:'space-between',borderWidth:1,borderColor:'rgba(221,242,138,0.14)'},secondaryGoalNumber:{fontFamily:'sans-serif-condensed',fontSize:11,fontWeight:'900',color:'#9BB3A2'},secondaryGoalLabel:{fontSize:7,fontWeight:'900',letterSpacing:.2,color:paper},secondaryGoalArrow:{alignSelf:'flex-end',fontSize:13,color:'#A7BAAB',fontWeight:'700'},setupError:{fontSize:10,fontWeight:'700',color:'#FF9D7F',marginTop:8},setupBottom:{marginTop:22},setupPrivacy:{fontSize:9,color:'#B6C9B8',marginBottom:12},setupButton:{minHeight:52,backgroundColor:orange,borderTopLeftRadius:5,borderTopRightRadius:25,borderBottomLeftRadius:25,borderBottomRightRadius:5,flexDirection:'row',alignItems:'center',justifyContent:'space-between',paddingHorizontal:17},setupButtonText:{fontSize:9,fontWeight:'900',letterSpacing:1,color:paper},setupButtonArrow:{fontSize:19,color:paper,fontWeight:'900'},setupCancel:{alignSelf:'center',paddingVertical:12},setupCancelText:{fontSize:8,fontWeight:'900',letterSpacing:1,color:'#C3D2C5'},profileLoading:{flex:1,alignItems:'center',justifyContent:'center'},profileLoadingText:{fontSize:9,fontWeight:'900',letterSpacing:1.3,color:green},
   profileBanner:{flexDirection:'row',alignItems:'center',gap:12,paddingVertical:18,borderTopWidth:1,borderBottomWidth:1,borderColor:line,marginBottom:25},profileMono:{fontFamily:'sans-serif-condensed',fontWeight:'900',fontSize:21,color:orange},profileIdentity:{flex:1},profileTitle:{fontFamily:'sans-serif-condensed',fontWeight:'900',fontSize:18,color:ink},profileSubtitle:{fontSize:9,color:quiet,marginTop:3},editLink:{fontSize:7,fontWeight:'900',letterSpacing:.8,color:green},preferenceRow:{minHeight:58,flexDirection:'row',alignItems:'center',gap:10},preferenceLabel:{width:86,fontSize:8,fontWeight:'900',letterSpacing:1,color:green},preferenceValue:{flex:1,fontSize:11,fontWeight:'700',color:ink},preferenceArrow:{fontSize:15,color:orange,fontWeight:'900'},profilePlan:{marginTop:28,paddingTop:17,borderTopWidth:1,borderTopColor:line},profilePlanLabel:{fontSize:8,fontWeight:'900',letterSpacing:1.3,color:green},profilePlanTitle:{fontFamily:'sans-serif-condensed',fontSize:18,fontWeight:'900',color:ink,marginTop:6},profilePlanSub:{fontSize:10,color:quiet,marginTop:3},toast:{position:'absolute',bottom:82,left:22,right:22,flexDirection:'row',alignItems:'center',gap:8,backgroundColor:ink,paddingHorizontal:14,paddingVertical:12,borderTopLeftRadius:18,borderBottomRightRadius:18},toastDot:{fontSize:18,color:lime},toastText:{flex:1,color:paper,fontSize:10,fontWeight:'700'}
+});
+
+const l = StyleSheet.create({
+  localeSection:{marginBottom:8},localeHeading:{fontSize:8,fontWeight:'900',letterSpacing:1.1,color:green,marginBottom:9},localeOptions:{flexDirection:'row',gap:8},
+  localeOption:{flex:1,minHeight:53,paddingHorizontal:9,paddingVertical:8,backgroundColor:'#E7E8DE',justifyContent:'space-between',borderTopLeftRadius:17,borderTopRightRadius:4,borderBottomLeftRadius:4,borderBottomRightRadius:17,borderWidth:1,borderColor:'#D8D8CA'},localeOptionActive:{backgroundColor:ink,borderColor:ink},localeName:{fontFamily:'sans-serif-condensed',fontSize:12,fontWeight:'900',color:ink},localeCode:{alignSelf:'flex-end',fontSize:6,fontWeight:'900',letterSpacing:1,color:green},localeNameActive:{color:paper},
 });
 
 const a = StyleSheet.create({

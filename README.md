@@ -44,6 +44,7 @@ No Perfil, **Apagar dados da nuvem** remove perfil sincronizado, progresso, resu
 - A edição diária combina uma imagem autoral e uma missão correspondente. Há 30 combinações; a ordem é embaralhada por mês, fica estável durante o dia e percorre as 30 sem repetição antes de recomeçar. No dia 31, a primeira combinação do ciclo volta.
 - A revelação da missão tem entrada animada; a evolução mostra uma árvore de fases tocável.
 - Conta por e-mail e senha e sincronização de perfil/progresso recente estão implementadas; exigem as variáveis do Supabase e a migração SQL acima.
+- O Perfil permite escolher português brasileiro, inglês ou espanhol. A escolha fica salva neste aparelho; datas, semana, interface, missões e novas leituras visuais acompanham o idioma selecionado.
 - A aba Evolução exibe até 30 dias do histórico local e sincronizado.
 - Pagamentos e chamadas de IA para outras funções ainda não estão conectados.
 - Os números exibidos são demonstrativos.
